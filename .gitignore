@@ -1,0 +1,25 @@
+# Local order exports and office lock files
+/example-files/
+*.[xX][lL][sS]
+*.[xX][lL][sS][xX]
+*.[xX][lL][sS][mM]
+*.[xX][lL][sS][bB]
+.~lock.*#
+~$*
+
+# Order-derived analysis and owner annotations (local only)
+/analysis/
+
+# Python caches and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local secrets and editor/OS files
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/
