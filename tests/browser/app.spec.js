@@ -90,7 +90,7 @@ test('real full Excel: imports all cells despite dimension, correct metrics and 
   await close(page);await page.locator('[data-filter="all"]').click();await page.locator('#search').fill('');await expect(page.locator('#product-rows tr')).toHaveCount(75);
   await page.screenshot({path:path.join(root,'analysis/browser/full-order.png'),fullPage:true});
   await select(page,'249-110');await expect(page.locator('#drawer')).toContainText('отрицательные продажи');await expect(page.locator('#apply-proposal')).toBeDisabled();
-  await page.locator('#strategy-form input[name=forecast]').fill('2');await page.getByRole('button',{name:'Пересчитать предложение'}).click();await expect(page.locator('#apply-proposal')).toBeEnabled();
+  await page.locator('#strategy-form input[name=forecast]').fill('2');await page.getByRole('button',{name:'Пересчитать предложение'}).click();await expect(page.locator('#keep-source')).toBeEnabled();expect(await page.evaluate(()=>SGateApp.getCalculation().results.get('249-110').review)).toBe(false);
   expect(errors).toEqual([]);expect(network).toEqual([]);
 });
 
@@ -99,4 +99,35 @@ test('old cut file safely shows missing cube and never offers positive correctio
   await open(page);await page.locator('#file-input').setInputFiles(path.join(root,'example-files/order-cut.xlsx'));await expect(page.locator('#workspace')).toBeVisible();
   await expect(page.locator('#notice')).toContainText('нет «КУБ»');
   expect(await page.evaluate(()=>[...SGateApp.getCalculation().results.values()].every(r=>r.quantity===0))).toBe(true);
+});
+
+
+test('main queue excludes routine rows; mop preserves Web; cyclic pair has explicit safe selection',async({page})=>{
+  test.skip(!fs.existsSync(path.join(root,'example-files/order-full.xlsx')),'Local Excel is not published');
+  const {errors,network}=await open(page);
+  await page.locator('#settings-button').click();
+  await page.locator('#settings-form input[name=orderDate]').fill('2026-11-02');
+  await page.locator('#settings-form input[name=incomingDate]').fill('2026-11-05');
+  await page.locator('#settings-form button[type=submit]').click();
+  await page.locator('#file-input').setInputFiles(path.join(root,'example-files/order-full.xlsx'));
+  await expect(page.locator('#workspace')).toBeVisible({timeout:60000});
+  await expect(page.locator('[data-filter=pending]')).toContainText('128');
+  await expect(page.locator('#product-rows')).not.toContainText('444-268');
+  await page.screenshot({path:path.join(root,'analysis/browser/attention-queue.png'),fullPage:true});
+  await select(page,'444-268');await expect(page.locator('#drawer')).toContainText('Достаточный Web сохраняем.');
+  await expect(page.locator('#keep-source')).toContainText('40');await expect(page.locator('#apply-proposal')).toBeDisabled();
+  await close(page);await select(page,'655-001');await expect(page.locator('.replacement-panel')).toContainText('Взаимная замена');
+  await expect(page.locator('.replacement-panel')).toContainText('меняется на 655-001');
+  await expect(page.locator('.replacement-panel')).toContainText('меняется на 655-007');
+  await expect(page.locator('#keep-source')).toBeEnabled();
+  await page.locator('#replacement-form select').selectOption('655-007');await page.locator('#replacement-form button').click();
+  await expect(page.locator('[data-zero-peer="655-001"]')).toHaveCount(0);
+  await page.locator('[data-open-peer="655-007"]').click();
+  await page.locator('#manual-form input').fill('2');await page.locator('#manual-form button').click();
+  await expect(page.locator('#toast')).toContainText('Сначала согласуйте');
+  await page.locator('[data-zero-peer="655-001"]').click();
+  await page.locator('#manual-form input').fill('2');await page.locator('#manual-form button').click();
+  expect(await page.evaluate(()=>SGateApp.getState().decisions['655-001'].quantity)).toBe(0);
+  expect(await page.evaluate(()=>SGateApp.getState().decisions['655-007'].quantity)).toBe(2);
+  expect(errors.filter(e=>!e.includes('Сначала согласуйте'))).toEqual([]);expect(network).toEqual([]);
 });

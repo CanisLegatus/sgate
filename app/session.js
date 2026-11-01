@@ -26,14 +26,19 @@
     return out;
   }
   function newSession(order, initialSettings) {
-    return { order, settings: initialSettings || settings(), overrides: empty(), decisions: empty(), history: [] };
+    return { order, settings: initialSettings || settings(), overrides: empty(), decisions: empty(), replacementChoices: empty(), history: [] };
   }
   function calculate(state) {
-    const ctx = E.createContext(state.order, state.settings), results = new Map();
+    const ctx = E.createContext(state.order, state.settings, state.replacementChoices || {}), results = new Map();
     for (const p of state.order.products) results.set(p.sku, E.compute(p, ctx, state.overrides[p.sku] || {}));
     let invalidated = 0;
     for (const [sku, decision] of Object.entries(state.decisions)) {
       if (!results.has(sku) || decision.signature !== results.get(sku).signature) { delete state.decisions[sku]; invalidated++; }
+    }
+    ctx.decisions = state.decisions;
+    for (const group of ctx.groups.values()) for (const sku of group.members) {
+      const p = ctx.products.get(sku);
+      if (p) results.set(sku,E.compute(p,ctx,state.overrides[sku] || {}));
     }
     return { ctx, results, invalidated, metrics: E.metrics(state.order, results, state.decisions, ctx) };
   }
@@ -61,13 +66,13 @@
     return changes;
   }
   function localPayload(state) {
-    return { version: 1, rulesVersion: E.VERSION, fingerprint: state.order.metadata.fingerprint, settings: state.settings, overrides: state.overrides, decisions: state.decisions, history: state.history };
+    return { version: 1, rulesVersion: E.VERSION, fingerprint: state.order.metadata.fingerprint, replacementChoices: state.replacementChoices || {}, settings: state.settings, overrides: state.overrides, decisions: state.decisions, history: state.history };
   }
   function snapshot(state) {
     return JSON.parse(JSON.stringify({ ...localPayload(state), format: 'sgate-session', savedAt: new Date().toISOString(), rows: state.order.rows, metadata: state.order.metadata }));
   }
   function restorePayload(order, payload, allowDate = true) {
-    if (!payload || payload.version !== 1 || payload.rulesVersion !== E.VERSION) throw new Error('Неподдерживаемая версия сессии');
+    if (!payload || payload.version !== 1 || ![E.VERSION,'sgate-1.0'].includes(payload.rulesVersion)) throw new Error('Неподдерживаемая версия сессии');
     if (payload.fingerprint !== order.metadata.fingerprint) throw new Error('Сессия относится к другому исходному файлу');
     const config = payload.settings;
     if (!config || typeof config !== 'object') throw new Error('Нет настроек сессии');
@@ -80,11 +85,19 @@
       if (!skus.has(sku)) throw new Error('Настройки неизвестного артикула: ' + sku);
       state.overrides[sku] = overrideValue(value);
     }
+    if (payload.replacementChoices !== undefined) {
+      if (!payload.replacementChoices || typeof payload.replacementChoices !== 'object' || Array.isArray(payload.replacementChoices)) throw new Error('Неверный выбор замен');
+      for (const [id,sku] of Object.entries(payload.replacementChoices)) {
+        if (typeof sku !== 'string') throw new Error('Неверный артикул замены');
+        state.replacementChoices[id] = sku;
+      }
+    }
+    if (payload.rulesVersion !== E.VERSION) state.migratedFrom = payload.rulesVersion;
     const calculated = calculate(state), pending = [];
     for (const [sku, d] of Object.entries(payload.decisions)) {
       if (!skus.has(sku) || !d || !['keep','apply'].includes(d.kind) || !E.finite(d.quantity) || d.quantity < 0 || !Number.isInteger(d.quantity)) throw new Error('Повреждённое решение: ' + sku);
       const r = calculated.results.get(sku);
-      if (d.signature !== r.signature) continue; // A changed date invalidates approvals.
+      if (state.migratedFrom || d.signature !== r.signature) continue; // A changed date invalidates approvals.
       if (d.kind === 'keep' && d.quantity !== r.source) throw new Error('Изменённое исходное количество: ' + sku);
       const p = calculated.ctx.products.get(sku);
       const error = E.checkDecision(p, r, d.kind, d.quantity, calculated.ctx, empty());
@@ -113,6 +126,25 @@
     }
     return restorePayload(I.parseRows(payload.rows, metadata), payload);
   }
+  function chooseReplacement(state,calculated,groupId,sku) {
+    const group = calculated.ctx.groups.get(groupId);
+    if (!group || !group.ambiguous || !group.members.includes(sku)) throw new Error('Выбор не относится к неоднозначной группе замен');
+    const p = calculated.ctx.products.get(sku);
+    if (!p || !E.cubeEligibility(p).allowed || p.errors.length) throw new Error('Выбранный артикул не допущен к заказу');
+    if (!state.replacementChoices) state.replacementChoices = empty();
+    state.replacementChoices[groupId] = sku;
+  }
+  function queueItems(state,calculated,subset = state.order.products) {
+    const groups = new Map(), singles = [];
+    for (const p of subset) {
+      const r = calculated.results.get(p.sku), d = state.decisions[p.sku];
+      if (!r.attention.required || d && d.signature === r.signature) continue;
+      if (!r.group?.ambiguous) { singles.push(p); continue; }
+      const previous = groups.get(r.group.id);
+      if (!previous || (r.source > 0 ? 1000 : 0)+r.attention.severity > (calculated.results.get(previous.sku).source > 0 ? 1000 : 0)+calculated.results.get(previous.sku).attention.severity) groups.set(r.group.id,p);
+    }
+    return [...singles,...groups.values()];
+  }
   function safeCSV(value) {
     let s = String(value === null || value === undefined ? '' : value);
     if (/^[\s]*[=+\-@]/.test(s)) s = "'" + s;
@@ -121,5 +153,5 @@
   function csv(rows) {
     return '\uFEFF' + rows.map(row => row.map(v => typeof v === 'number' ? String(v) : safeCSV(v)).join(';')).join('\r\n');
   }
-  return { defaultSettings: settings, normalizeOverride: overrideValue, newSession, calculate, decide, changeRows, localPayload, snapshot, restorePayload, restoreSnapshot, safeCSV, csv };
+  return { queueItems, chooseReplacement, defaultSettings: settings, normalizeOverride: overrideValue, newSession, calculate, decide, changeRows, localPayload, snapshot, restorePayload, restoreSnapshot, safeCSV, csv };
 });

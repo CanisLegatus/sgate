@@ -7,7 +7,7 @@ const I = require('../app/importer.js');
 const S = require('../app/session.js');
 const XLSX = require('../vendor/xlsx.full.min.js');
 function product(overrides = {}) {
-  return { sku:'TEST-001',name:'Тест',row:8,hasStoreCube:true,productCube:'Группа-0,1',storeCube:'Группа-0.5',commercialA:'',commercialB:'',priceCategory:'',topOnDelivery:'',merchandising:'',tradeCategory:'основной ассортимент',promo:'',comment:'',warnings:'',stock:70,incoming:0,allocations:0,sales:[40,40,40,40],batch:28,centralStock:1000,price:100,cost:50,mtz:50,webRecommendation:56,managerOverride:null,webTotal:56,errors:[],...overrides };
+  return { sku:'TEST-001',name:'Тест',row:8,hasStoreCube:true,productCube:'Группа-0,1',storeCube:'Группа-0.5',commercialA:'',commercialB:'',priceCategory:'',topOnDelivery:'',merchandising:'',tradeCategory:'основной ассортимент',promo:'',comment:'',warnings:'',stock:70,incoming:0,allocations:0,sales:[40,40,40,40],batch:28,centralStock:1000,price:100,cost:50,mtz:50,webRecommendation:0,managerOverride:null,webTotal:0,errors:[],...overrides };
 }
 function calculate(p, overrides = {}, config = {}, others = []) {
   const order={products:[p,...others],metadata:{fingerprint:'test'}};
@@ -39,7 +39,7 @@ test('exact decimal cube comparison and absolute bans',()=>{
   assert.equal(E.cubeEligibility(product({productCube:'СС_ЗОЛОТО-1',storeCube:'СС_ЗОЛОТО-1'})).allowed,true);
 });
 test('blocked protected SKU cannot be ordered even when keeping Web',()=>{
-  const p=product({productCube:'ЗО',commercialA:'И-индикатор'}),{ctx,r}=calculate(p);
+  const p=product({productCube:'ЗО',commercialA:'И-индикатор',webRecommendation:56}),{ctx,r}=calculate(p);
   assert.equal(r.quantity,0);assert.match(E.checkDecision(p,r,'keep',undefined,ctx,{}),/Абсолютный/);
   assert.equal(E.checkDecision(p,r,'apply',0,ctx,{}),null);
 });
@@ -95,7 +95,7 @@ test('replacement direction and zero-in-store switch to new SKU',()=>{
   assert.equal(E.compute(next,ctx2).replacement.allowed,false);
 });
 test('replacement pair may not be ordered twice, including unreviewed original',()=>{
-  const old=product({sku:'OLD',comment:'меняется на NEW'}),next=product({sku:'NEW',comment:'вместо OLD'});
+  const old=product({sku:'OLD',comment:'меняется на NEW'}),next=product({sku:'NEW',comment:'вместо OLD',webRecommendation:28});
   const {ctx,r}=calculate(old,{}, {},[next]);
   assert.match(E.checkDecision(old,r,'apply',28,ctx,{}),/В паре замен/);
   assert.equal(E.checkDecision(old,r,'apply',28,ctx,{NEW:{quantity:0}}),null);
@@ -120,7 +120,7 @@ test('actual full file: ignore broken dimension, exact cube audit and stock metr
   const counts={};for(const r of calc.results.values())counts[r.cube.code]=(counts[r.cube.code]||0)+1;
   assert.deepEqual(counts,{explicit_block:3514,inside:6801,closed:235,outside:76});
   assert.equal(calc.metrics.active,7665);assert.equal(calc.metrics.value,18156991.3);
-  for(const p of order.products)assert.equal(E.validCorrection(p,calc.results.get(p.sku).quantity),null,p.sku);
+  for(const p of order.products){const r=calc.results.get(p.sku);if(r.action==='apply')assert.equal(E.validCorrection(p,r.quantity),null,p.sku);if(r.cube.known&&!r.cube.allowed)assert.equal(r.quantity,0,p.sku);}
 });
 test('seven user decisions remain representable, persist, and export only real changes',{skip:!hasFiles},()=>{
   const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1}),calc=S.calculate(state);
@@ -165,4 +165,47 @@ test('unmapped promo does not silently extrapolate promotional sales into an aut
   assert.equal(calculate(p).r.review,true);
   const explicit=calculate(p,{promoWeeks:[false,false,true,true]}).r;
   assert.equal(explicit.demand,2);assert.equal(explicit.review,false);
+});
+
+
+test('adequate Web remains unchanged; reduction and informational tags are optional',()=>{
+  const p=product({stock:15,sales:[9,17,17,21],batch:2,webRecommendation:40,promo:'А 23.10 - 30.10',commercialA:'И-индикатор'});
+  const {r}=calculate(p,{}, {orderDate:'2026-11-02'});
+  assert.equal(r.demand,17.8);assert.equal(r.quantity,40);assert.equal(r.action,'keep');assert.equal(r.review,false);
+  assert.equal(r.sourceRisk,false);assert.equal(r.attention.required,false);assert.equal(r.canReduce,true);
+  assert.equal(r.sourceProjection.secondBefore,29.571429);
+  assert.equal(calculate(p,{baseTarget:r.target},{orderDate:'2026-11-02'}).r.quantity,r.minimumQuantity);
+});
+test('attention checks Web coverage, not shortage in the no-order alternative',()=>{
+  const p=product({stock:70,webRecommendation:56,priceCategory:'ПЦ'}),{r}=calculate(p);
+  assert.ok(r.zero.secondSigned<0);assert.equal(r.attention.required,false);assert.equal(r.quantity,56);
+  const shortage=calculate({...p,webRecommendation:0}).r;
+  assert.equal(shortage.attention.kind,'risk');assert.ok(shortage.quantity>0);
+  const forbidden=calculate({...p,productCube:'ЗО',webRecommendation:0}).r;
+  assert.equal(forbidden.attention.required,false);assert.equal(forbidden.quantity,0);
+});
+test('complementary replacement comments form one directed relation, not a cycle',()=>{
+  const a=product({sku:'OLD',comment:'меняется на NEW'}),b=product({sku:'NEW',comment:'вместо OLD'});
+  const {ctx}=calculate(a,{}, {},[b]);const g=ctx.groupBySku.get('OLD');
+  assert.equal(g.cyclic,false);assert.equal(g.ambiguous,false);assert.equal(g.links.length,1);
+});
+test('real mop and cyclic replacements: one queue case, explicit choice, no double order, persistence',{skip:!hasFiles},()=>{
+  const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1});let c=S.calculate(state);
+  assert.equal(c.results.get('444-268').quantity,40);assert.equal(c.results.get('444-268').attention.required,false);
+  assert.equal(S.queueItems(state,c).length,128);
+  const group=c.ctx.groupBySku.get('655-001');assert.equal(group.cyclic,true);assert.equal(group.links.length,2);
+  assert.equal(S.queueItems(state,c).filter(p=>group.members.includes(p.sku)).length,1);
+  S.decide(state,c,'655-001','keep');assert.equal(state.decisions['655-001'].quantity,6);
+  S.chooseReplacement(state,c,group.id,'655-007');c=S.calculate(state);assert.equal(state.decisions['655-001'],undefined);
+  assert.throws(()=>S.decide(state,c,'655-007','apply',2),/Сначала согласуйте/);
+  S.decide(state,c,'655-001','apply',0);c=S.calculate(state);S.decide(state,c,'655-007','apply',2);
+  const restored=S.restoreSnapshot(JSON.parse(JSON.stringify(S.snapshot(state))));
+  assert.equal(restored.replacementChoices[group.id],'655-007');assert.equal(restored.decisions['655-001'].quantity,0);assert.equal(restored.decisions['655-007'].quantity,2);
+});
+test('legacy sessions keep settings but never reuse approvals, even with a matching forged signature',{skip:!hasFiles},()=>{
+  const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1}),c=S.calculate(state);
+  state.overrides['444-268']={mode:'hold',percent:0};S.decide(state,c,'914-005','apply',56);
+  const payload=JSON.parse(JSON.stringify(S.localPayload(state)));payload.rulesVersion='sgate-1.0';
+  const restored=S.restorePayload(state.order,payload);
+  assert.equal(Object.keys(restored.decisions).length,0);assert.equal(restored.overrides['444-268'].mode,'hold');
 });

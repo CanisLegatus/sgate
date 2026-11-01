@@ -20,13 +20,13 @@
  <div class="page-heading"><div><div class="eyebrow">РАБОЧИЙ СТОЛ</div><h1>Проверка заказа<span class="heading-dot">.</span></h1><p id="source-label" class="muted"></p></div><div class="heading-actions"><button id="new-file-button" class="button quiet">Другой Excel</button><button id="save-button" class="button">Сохранить сессию</button><button id="export-button" class="button primary">Выгрузить решения ↗</button></div></div>
  <div id="notice" class="notice" hidden></div>
  <div class="schedule" id="schedule"></div>
- <div class="metrics" id="metrics"></div>
- <div class="work-panel"><div class="panel-top"><div><h2>Товары <span id="table-count"></span></h2><p class="muted">Предложения требуют подтверждения. Пики продаж не срезаются.</p></div><label class="search"><span>⌕</span><input id="search" type="search" placeholder="Артикул, товар или категория" aria-label="Поиск товаров"></label></div>
+ <div class="metrics" id="metrics"></div><div class="triage-summary" id="triage-summary"></div>
+ <div class="work-panel"><div class="panel-top"><div><h2>Товары <span id="table-count"></span></h2><p class="muted">Здесь только случаи для решения. Достаточный Web и уже нулевые запреты не требуют отдельных кликов.</p></div><label class="search"><span>⌕</span><input id="search" type="search" placeholder="Артикул, товар или категория" aria-label="Поиск товаров"></label></div>
  <div class="filter-row" id="filters"></div>
- <div class="table-tools"><span id="list-summary"></span><div><label class="sort-label">Порядок <select id="sort"><option value="priority">По важности</option><option value="sku">По артикулу</option><option value="delta">По изменению заказа</option></select></label><button class="button small" id="approve-zeros">Согласовать запреты (0)</button></div></div>
- <div class="table-scroll"><table class="products"><thead><tr><th>Товар</th><th>Продажи −4 → −1</th><th>Прогноз<br><small>шт./нед.</small></th><th>Остаток / едет</th><th>Исходный<br><small>Web / УМ</small></th><th>Предложение</th><th>Решение</th></tr></thead><tbody id="product-rows"></tbody></table></div>
+ <div class="table-tools"><span id="list-summary"></span><div><label class="sort-label">Порядок <select id="sort"><option value="priority">По важности</option><option value="sku">По артикулу</option><option value="delta">По изменению заказа</option></select></label><button class="button small" id="approve-zeros">Обнулить запрещённые (0)</button></div></div>
+ <div class="table-scroll"><table class="products"><thead><tr><th>Товар</th><th>Продажи −4 → −1</th><th>Прогноз<br><small>шт./нед.</small></th><th>Остаток / едет</th><th>Исходный<br><small>Web / УМ</small></th><th>Остаток со Web<br><small>перед вторым четвергом</small></th><th>Рекомендация</th><th>Что требует решения</th></tr></thead><tbody id="product-rows"></tbody></table></div>
  <div class="pagination"><span id="page-label"></span><div><button id="prev-page" class="button small">← Назад</button><button id="next-page" class="button small">Далее →</button></div></div></div>
- <div class="workspace-footnote">Прогноз — оценка, не гарантия продаж. Сумма заказа на экране включает ещё не просмотренные исходные количества. Перед отправкой проверьте заказ в Web-заказе.</div>
+ <div class="workspace-footnote">Прогноз — оценка, не гарантия продаж. Остальные позиции сохраняют исходные количества без поштучного подтверждения. Необязательные сокращения и ручной контроль доступны отдельными фильтрами. Перед отправкой проверьте заказ в Web-заказе.</div>
 </section>
 </main>
 <aside id="drawer" class="drawer" hidden aria-label="Карточка товара"></aside><div id="drawer-shade" class="drawer-shade" hidden></div>

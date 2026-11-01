@@ -33,38 +33,46 @@
   function approved(p) { const d = state.decisions[p.sku]; return d && d.signature === calculated.results.get(p.sku).signature; }
   function priority(p) {
     const r = calculated.results.get(p.sku);
-    return (approved(p) ? 0 : 100000) + (r.review ? 20000 : 0) + (r.zero.lostBefore + r.zero.lostAfter > 0 ? 10000 : 0) + (r.blocked && r.source > 0 ? 8000 : 0) + (p.promo ? 3000 : 0) + (r.protected ? 1500 : 0) + Math.min(1000, Math.abs(r.quantity - r.source));
+    return (approved(p) ? 0 : 100000) + r.attention.severity*100 + Math.min(1000,Math.abs(r.quantity-r.source));
   }
+  const alreadyZero = (p,r) => r.cube.known && !r.cube.allowed && r.source === 0;
   const filterDefinitions = [
-    ['pending','Не проверены',(p,r) => !approved(p)],
-    ['changes','Предлагаем изменить',(p,r) => r.quantity !== r.source],
-    ['risk','Риск дефицита',(p,r) => r.zero.lostBefore + r.zero.lostAfter > 0 || r.zero.secondBefore < r.reserve],
-    ['review','Проверить',(p,r) => r.review || r.warnings.length > 0],
-    ['protected','ПЦ / индикаторы / ТОП',(p,r) => r.protected],
-    ['blocked','Запреты',(p,r) => !r.cube.allowed],
-    ['approved','Согласованы',(p,r) => approved(p)],
+    ['pending','К рассмотрению',(p,r) => r.attention.required && !approved(p)],
+    ['changes','Изменить заказ',(p,r) => r.action === 'apply' && !r.review && r.quantity !== r.source && !approved(p)],
+    ['risk','Не хватает в Web',(p,r) => r.sourceRisk && r.cube.allowed && !r.blocked],
+    ['review','Уточнить данные',(p,r) => r.attention.required && ['data','promo','replacement'].includes(r.attention.kind) && !approved(p)],
+    ['quiet','Без изменений',(p,r) => !r.attention.required && !alreadyZero(p,r)],
+    ['zero','Уже не заказываются',alreadyZero],
+    ['opportunities','Можно сократить',(p,r) => r.canReduce && !r.sourceRisk && !r.attention.required],
+    ['control','Ручной контроль',(p,r) => r.control],
+    ['approved','Согласованы',(p,r) => Boolean(approved(p))],
     ['all','Все товары',() => true]
   ];
+  function filteredRows(key,subset=state.order.products) {
+    const predicate = filterDefinitions.find(v=>v[0]===key)[2];
+    const matched = subset.filter(p=>predicate(p,calculated.results.get(p.sku)));
+    return ['pending','review'].includes(key) ? E.queueItems(state,calculated,matched) : matched;
+  }
   function list() {
-    const predicate = filterDefinitions.find(v => v[0] === filter)[2];
-    const terms = query.toLocaleLowerCase('ru-RU').split(/\s+/).filter(Boolean);
-    const rows = state.order.products.filter(p => {
-      const r = calculated.results.get(p.sku);
-      return predicate(p,r) && (!terms.length || terms.every(t => [p.sku,p.name,p.group,p.productCube,p.tradeCategory,p.commercialA,p.commercialB].join(' ').toLocaleLowerCase('ru-RU').includes(t)));
-    });
-    rows.sort((a,b) => sort === 'sku' ? a.sku.localeCompare(b.sku) : sort === 'delta' ? Math.abs(calculated.results.get(b.sku).quantity - E.baseline(b)) - Math.abs(calculated.results.get(a.sku).quantity - E.baseline(a)) || a.row-b.row : priority(b)-priority(a) || a.row-b.row);
+    const terms=query.toLocaleLowerCase('ru-RU').split(/\s+/).filter(Boolean);
+    const matched=state.order.products.filter(p=>!terms.length || terms.every(t=>[p.sku,p.name,p.group,p.productCube,p.tradeCategory,p.commercialA,p.commercialB].join(' ').toLocaleLowerCase('ru-RU').includes(t)));
+    const rows=filteredRows(filter,matched);
+    rows.sort((a,b)=>sort==='sku'?a.sku.localeCompare(b.sku):sort==='delta'?Math.abs(calculated.results.get(b.sku).quantity-E.baseline(b))-Math.abs(calculated.results.get(a.sku).quantity-E.baseline(a))||a.row-b.row:priority(b)-priority(a)||a.row-b.row);
     return rows;
   }
   function renderMetrics() {
     const m = E.metrics(state.order, calculated.results, state.decisions, calculated.ctx);
     calculated.metrics = m;
     const cards = [
-      ['СОГЛАСОВАНО',`${money.format(m.approved)} <span style="font-size:13px;opacity:.6">/ ${money.format(m.total)}</span>`,`${m.changes} корректировок для переноса`],
+      ['К РАССМОТРЕНИЮ',money.format(E.queueItems(state,calculated).length),`${m.changes} изменений согласовано · пары сгруппированы`],
       ['SKU НА М²',precise.format(m.skuPerM2),`${money.format(m.active)} SKU в наличии · 352 м²`],
       ['ТЫС. ₽ НА М²',precise.format(m.valuePerM2),'В розничных ценах · не норматив'],
       ['ЗАПАС СЕЙЧАС',`${precise.format(m.value/1e6)} <span style="font-size:13px">млн ₽</span>`,`После поступления: ${precise.format(m.plannedValue/1e6)} млн ₽*`],
       ['ПРОЕКТ ЗАКАЗА',`${money.format(m.orderValue)} <span style="font-size:13px">₽</span>`,'С учётом непросмотренных Web-позиций*']
     ];
+    $('triage-summary').innerHTML = [['quiet','Сохраняем исходный Web','Не нужно подтверждать по одному'],['zero','Уже не заказываются','Запрет есть, исходное количество 0'],['opportunities','Возможности сокращения','Необязательный анализ запаса']].map(([key,title,note])=>`<button class="triage-card" data-filter="${key}"><span>${esc(title)}</span><strong>${money.format(filteredRows(key).length)}</strong><small>${esc(note)}</small></button>`).join('');
+    const zeroChanges=state.order.products.filter(p=>{const r=calculated.results.get(p.sku);return r.cube.known&&!r.cube.allowed&&r.source>0&&!approved(p);}).length;
+    $('approve-zeros').disabled=!zeroChanges; $('approve-zeros').textContent=`Обнулить запрещённые (${zeroChanges})`;
     $('metrics').innerHTML = cards.map(([label,value,note]) => `<div class="metric"><div class="label">${label}</div><div class="number">${value}</div><small>${esc(note)}</small></div>`).join('');
   }
   function renderTable() {
@@ -78,9 +86,10 @@
       const r = calculated.results.get(p.sku), d = approved(p) ? state.decisions[p.sku] : null;
       const max = Math.max(1,...p.sales);
       const tags = [!r.cube.allowed ? `<span class="tag red">${r.cube.known?'Запрет':'Допуск неизвестен'}</span>` : '',r.protected?'<span class="tag green">Защита наличия</span>':'',p.promo?'<span class="tag orange">Промо</span>':'',r.webConflict?'<span class="tag orange">Конфликт Web</span>':''].join('');
-      const status = d ? `<span class="status approved">✓ ${d.kind==='keep'?'Исходный':f(d.quantity)+' шт.'}</span>` : `<span class="status ${r.review?'review':'pending'}">${r.review?'Нужен разбор':'Не проверен'} →</span>`;
-      return `<tr data-sku="${esc(p.sku)}" tabindex="0" aria-label="Открыть ${esc(p.sku)}" class="${selected===p.sku?'selected':''}"><td><span class="sku">${esc(p.sku)}</span><span class="product-name">${esc(p.name)}</span><div class="tags">${tags}</div></td><td><div class="sales-mini">${p.sales.map(n=>`<span style="height:${Math.max(2,n/max*25)}px"></span>`).join('')}</div><div class="sales-values">${p.sales.map(f).join(' / ')}</div></td><td><span class="qty">${f(r.demand)}</span></td><td class="stock-cell"><span class="qty">${f(p.stock)}</span><small>едет ${f(p.incoming)}</small></td><td><span class="qty cross">${f(r.source)}</span>${p.managerOverride!==null?'<small class="sku">есть ввод УМ</small>':''}</td><td><span class="qty proposed">${r.review?'—':f(r.quantity)}</span><small class="sku">${esc({auto:'По потребности',hold:'Держим',increase:'Увеличиваем',decrease:'Уменьшаем'}[r.mode])}</small></td><td>${status}</td></tr>`;
-    }).join('') || '<tr><td colspan="7" class="empty-row">Здесь пока нет товаров. Измените фильтр или поисковый запрос.</td></tr>';
+      const status = d ? `<span class="status approved">✓ ${d.kind==='keep'?'Исходный':f(d.quantity)+' шт.'}</span>` : r.attention.required ? `<span class="status review">${esc(r.attention.text)}</span>` : `<span class="status pending">${alreadyZero(p,r)?'Уже 0':'Действий не требуется'}</span>`;
+      const recommendation=r.action==='manual' ? `<span class="manual-label">${r.attention.kind==='replacement'?'Выбрать артикул':r.forecast.value===null?'Уточнить прогноз':'Проверить условия'}</span>` : `<span class="qty ${r.action==='keep'?'':'proposed'}">${r.action==='keep'?'Оставить ':''}${f(r.quantity)}</span>`;
+      return `<tr data-sku="${esc(p.sku)}" tabindex="0" aria-label="Открыть ${esc(p.sku)}" class="${selected===p.sku?'selected':''}"><td><span class="sku">${esc(p.sku)}</span><span class="product-name">${esc(p.name)}</span><div class="tags">${tags}</div></td><td><div class="sales-mini">${p.sales.map(n=>`<span style="height:${Math.max(2,n/max*25)}px"></span>`).join('')}</div><div class="sales-values">${p.sales.map(f).join(' / ')}</div></td><td><span class="qty">${r.forecast.value===null?'Уточнить':f(r.demand)}</span></td><td class="stock-cell"><span class="qty">${f(p.stock)}</span><small>едет ${f(p.incoming)}</small></td><td><span class="qty cross">${f(r.source)}</span>${p.managerOverride!==null?'<small class="sku">есть ввод УМ</small>':''}</td><td class="source-coverage"><span class="qty ${r.sourceRisk?'risk-qty':''}">${r.forecast.value===null?'?':f(r.sourceProjection.secondSigned)}</span><small class="sku">${r.sourceRisk?'Web не покрывает':'с исходным Web'}</small></td><td>${recommendation}<small class="sku">${esc({auto:'Проверка Web',hold:'Держим',increase:'Увеличиваем',decrease:'Уменьшаем'}[r.mode])}${r.group?.ambiguous?' · связанная группа':''}</small></td><td>${status}</td></tr>`;
+    }).join('') || '<tr><td colspan="8" class="empty-row">В этой очереди нет нерешённых случаев. Исходные количества остальных товаров сохраняются; подтверждать весь заказ по одному не нужно.</td></tr>';
   }
   function render() {
     if (!state) return;
@@ -97,9 +106,14 @@
     $('schedule').innerHTML = `<span>Заказ <strong>${esc(date(state.settings.orderDate))}</strong></span><span class="arrow">→</span><span>Поступление <strong>${esc(date(cal.first))}</strong></span><span class="arrow">→</span><span>Проверяем до <strong>${esc(date(cal.second))}</strong></span><span>· ${cal.lead} + 7 дней</span>`;
     $('table-count').textContent = money.format(state.order.products.length);
     renderMetrics();
-    $('filters').innerHTML = filterDefinitions.map(([key,label,predicate]) => `<button class="filter ${key===filter?'active':''}" data-filter="${key}" aria-pressed="${key===filter}">${esc(label)}<span>${money.format(state.order.products.filter(p=>predicate(p,calculated.results.get(p.sku))).length)}</span></button>`).join('');
+    $('filters').innerHTML = filterDefinitions.map(([key,label,predicate]) => `<button class="filter ${key===filter?'active':''}" data-filter="${key}" aria-pressed="${key===filter}">${esc(label)}<span>${money.format(filteredRows(key).length)}</span></button>`).join('');
     renderTable();
     if (selected) renderDrawer();
+  }
+  function replacementPanel(p,r) {
+    const group=r.group; if(!group)return '';
+    const members=group.members.map(sku=>calculated.ctx.products.get(sku)).filter(Boolean);
+    return `<section class="replacement-panel"><h3>${group.cyclic?'Взаимная замена':group.ambiguous?'Связанная группа замен':'Пара замены'}</h3><p>${esc(r.replacement.reason)}</p>${members.map(item=>`<div class="replacement-member"><button class="text-button" data-open-peer="${esc(item.sku)}">${esc(item.sku)}</button><span>Остаток ${f(item.stock)} · Web ${f(E.baseline(item))}</span><small>${esc(item.comment || 'Без комментария')}</small>${item.sku!==p.sku&&E.baseline(item)>0?`<button class="button small" data-zero-peer="${esc(item.sku)}">Согласовать 0 для ${esc(item.sku)}</button>`:''}</div>`).join('')}${group.ambiguous?`<form id="replacement-form"><label>Какой артикул разрешить для этой группы?<select name="chosen" required><option value="">Выберите явно, без угадывания</option>${members.map(item=>`<option value="${esc(item.sku)}" ${group.chosen===item.sku?'selected':''} ${E.cubeEligibility(item).allowed?'':'disabled'}>${esc(item.sku)} · ${esc(item.name)}</option>`).join('')}</select></label><button type="submit" class="button small">Запомнить выбор артикула</button></form><small>Выбор не создаёт заказ. Другой товар не должен оставаться с положительным количеством. Можно сохранить исходный вариант без определения старого, если в нём заказан только один артикул.</small>${group.chosen?'<button class="text-button" id="clear-replacement">Снять выбор артикула</button>':''}`:''}</section>`;
   }
   function renderDrawer() {
     const p = calculated.ctx.products.get(selected);
@@ -110,13 +124,13 @@
     const tags = `<span class="tag ${r.cube.allowed?'green':'red'}">${esc(r.cube.reason)}</span>${r.protected?'<span class="tag green">Защита +25%</span>':''}`;
     const keepError = E.checkDecision(p,r,'keep',r.source,calculated.ctx,state.decisions);
     const fields = [ ['Куб товара',p.productCube],['Куб магазина',p.storeCube || '(пусто)'],['Коммерческая категория C',p.commercialA],['Коммерческая категория D',p.commercialB],['Торговая категория',p.tradeCategory],['Мерчкатегория',p.merchandising],['Цена магазина',f(p.price)+' ₽'],['Себестоимость',f(p.cost)+' ₽'],['ТОП на поставку',p.topOnDelivery],['Категория цены',p.priceCategory],['МТЗ (справочно)',p.mtz],['Запас дней Web сейчас',p.stockDays],['Запас дней Web план',p.plannedDays],['Товар в пути (AD)',p.inTransit],['Распределения (AF)',p.allocations],['Необработанные (AG)',p.pending],['Комментарий',p.comment],['Предупреждения Web',p.warnings],['Строка Excel',p.row] ];
-    $('drawer').innerHTML = `<div class="drawer-header"><span class="eyebrow">${esc(p.sku)} · ${esc(p.group || 'Товар')}</span><button id="close-drawer" class="icon-button" aria-label="Закрыть карточку">×</button><h2>${esc(p.name)}</h2><div class="tags">${tags}</div></div><div class="drawer-body"><div class="detail-stats"><div><span>В магазине</span><strong>${f(p.stock)}</strong></div><div><span>Уже едет</span><strong>${f(p.incoming)}</strong></div><div><span>Партия</span><strong>${f(p.batch)}</strong></div><div><span>Центр. склад</span><strong>${f(p.centralStock)}</strong></div></div><div class="detail-section"><h3>Запас по выбранному решению · ${f(previewQ)} шт.</h3><div class="trajectory"><div><small>Сегодня</small><strong>${f(p.stock)}</strong><span>${esc(date(state.settings.orderDate))}</span></div><div><small>После поступления</small><strong>${f(plan.firstAfter)}</strong><span>${esc(date(calculated.ctx.cal.first))}</span></div><div><small>Перед следующим</small><strong style="${plan.secondSigned<0?'color:var(--red)':''}">${f(plan.secondSigned)}</strong><span>${esc(date(calculated.ctx.cal.second))}</span></div></div><p class="muted" style="font-size:10px;margin-top:7px">Без нового заказа: ${f(r.zero.firstSigned)} → ${f(r.zero.secondSigned)}. Минус означает неудовлетворённый спрос, физический остаток — 0.</p></div>${r.warnings.length?`<div class="warning-list">${r.warnings.map(w=>`<p>• ${esc(w)}</p>`).join('')}</div>`:''}<div class="detail-section"><h3>Стратегия и целевой запас</h3><form id="strategy-form" class="strategy-form"><div class="form-grid"><label>Стратегия<select name="mode">${[['auto','По потребности'],['hold','Держим сток'],['increase','Увеличиваем'],['decrease','Уменьшаем']].map(([v,l])=>`<option value="${v}" ${(ov.mode||'auto')===v?'selected':''}>${l}</option>`).join('')}</select></label><label>Изменение цели, %<input name="percent" type="number" min="0" max="500" step="1" value="${esc(ov.percent||0)}"></label></div><div class="form-grid"><label>Базовая цель, шт.<input name="baseTarget" type="number" min="0" step="0.1" placeholder="Авто: ${f(r.baseTarget)}" value="${ov.baseTarget===null||ov.baseTarget===undefined?'':esc(ov.baseTarget)}"><small>Процент применяется к этой базе. Пусто — стартовая формула приложения, не утверждённая универсальная норма.</small></label><label>Прогноз, шт./нед.<input name="forecast" type="number" min="0" step="0.1" placeholder="По весам: ${f(r.forecast.raw)}" value="${ov.forecast===null||ov.forecast===undefined?'':esc(ov.forecast)}"><small>Ручная оценка заменяет взвешенный прогноз только для этого товара.</small></label></div><label>Продажи −4 / −3 / −2 / −1<span class="sales-values" style="display:block;margin:6px 0">${p.sales.map(f).join(' / ')}</span></label><div><label>Промонедели для исключения из обычного спроса</label><div class="promo-checks" style="margin-top:8px">${[0,1,2,3].map(i=>`<label><input name="promo${i}" type="checkbox" ${(ov.promoWeeks||[])[i]?'checked':''}>−${4-i}</label>`).join('')}</div><small class="muted" style="font-size:9px">Размечайте по известным датам акции. Границы недель не угадываются.</small></div>${p.incoming>0?`<label>Дата едущей партии<input name="incomingDate" type="date" value="${esc(r.zero.incomingDate)}"><small>Все поставки по четвергам; текущая дата — допущение, проверьте её.</small></label>`:''}<div class="info-note">Стартовая формула: «по потребности» — недельное покрытие + резерв для защищённых; для других стратегий авто-база — не меньше текущего остатка. Цель не опускается ниже покрытия. Можете задать базу вручную. Очистка пиков выключена.</div><button type="submit" class="button">Пересчитать предложение</button></form><p class="muted" style="margin-top:10px;font-size:10px">База ${f(r.baseTarget)} → цель ${f(r.target)} → потребность ${f(r.needed)} → партия ${f(r.quantity)}.</p></div><div class="detail-section"><h3>Почему такое предложение</h3><ul class="explanation">${r.reasons.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div><div class="decision-panel"><div class="decision-actions"><button class="button" id="keep-source" ${keepError?'disabled':''} title="${esc(keepError||'Не создаёт ручной корректировки')}">Оставить исходный · ${f(r.source)}</button><button class="button primary" id="apply-proposal" ${r.review?'disabled title="Уточните условия расчёта; при необходимости введите собственное количество"':''}>Принять · ${f(r.quantity)}</button></div><form id="manual-form" class="manual-form" novalidate><label>Своя корректировка, шт.<input name="quantity" type="number" min="0" step="${p.batch||1}" value="${f(previewQ).replace(/[\s\u00a0]/g,'').replace(',','.')}" required></label><button type="submit" class="button">Применить</button></form>${keepError?`<p class="muted" style="font-size:10px;margin-top:8px">Оставить положительный исходный нельзя: ${esc(keepError)}</p>`:''}${d?`<p class="status approved" style="margin-top:12px">✓ Согласовано: ${d.kind==='keep'?'оставить исходный':f(d.quantity)+' шт.'}</p><button id="reset-decision" class="text-button">Снять подтверждение</button>`:''}</div><details class="source-data"><summary>Все исходные показатели</summary><dl>${fields.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v===''?'—':v)}</dd>`).join('')}</dl></details></div>`;
+    $('drawer').innerHTML = `<div class="drawer-header"><span class="eyebrow">${esc(p.sku)} · ${esc(p.group || 'Товар')}</span><button id="close-drawer" class="icon-button" aria-label="Закрыть карточку">×</button><h2>${esc(p.name)}</h2><div class="tags">${tags}</div></div><div class="drawer-body"><div class="detail-stats"><div><span>В магазине</span><strong>${f(p.stock)}</strong></div><div><span>Уже едет</span><strong>${f(p.incoming)}</strong></div><div><span>Партия</span><strong>${f(p.batch)}</strong></div><div><span>Центр. склад</span><strong>${f(p.centralStock)}</strong></div></div><div class="detail-section"><h3>Запас по выбранному решению · ${f(previewQ)} шт.</h3><div class="source-summary">Исходный Web: <strong>${f(r.source)}</strong>. Перед вторым четвергом с ним: <strong>${r.forecast.value===null?'прогноз не задан':f(r.sourceProjection.secondBefore)}</strong>${r.sourceRisk?' — не хватает':''}.</div><div class="trajectory"><div><small>Сегодня</small><strong>${f(p.stock)}</strong><span>${esc(date(state.settings.orderDate))}</span></div><div><small>После поступления</small><strong>${f(plan.firstAfter)}</strong><span>${esc(date(calculated.ctx.cal.first))}</span></div><div><small>Перед следующим</small><strong style="${plan.secondSigned<0?'color:var(--red)':''}">${f(plan.secondSigned)}</strong><span>${esc(date(calculated.ctx.cal.second))}</span></div></div><p class="muted" style="font-size:10px;margin-top:7px">Без нового заказа: ${f(r.zero.firstSigned)} → ${f(r.zero.secondSigned)}. Минус означает неудовлетворённый спрос, физический остаток — 0.</p></div>${replacementPanel(p,r)}${r.warnings.length?`<div class="warning-list">${r.warnings.map(w=>`<p>• ${esc(w)}</p>`).join('')}</div>`:''}<div class="detail-section"><h3>Стратегия и целевой запас</h3><form id="strategy-form" class="strategy-form"><div class="form-grid"><label>Стратегия<select name="mode">${[['auto','Проверить исходный Web'],['hold','Держим сток'],['increase','Увеличиваем'],['decrease','Уменьшаем']].map(([v,l])=>`<option value="${v}" ${(ov.mode||'auto')===v?'selected':''}>${l}</option>`).join('')}</select></label><label>Изменение цели, %<input name="percent" type="number" min="0" max="500" step="1" value="${esc(ov.percent||0)}"></label></div><div class="form-grid"><label>Базовая цель, шт.<input name="baseTarget" type="number" min="0" step="0.1" placeholder="Авто: ${f(r.baseTarget)}" value="${ov.baseTarget===null||ov.baseTarget===undefined?'':esc(ov.baseTarget)}"><small>Процент применяется к этой базе. Пусто — стартовая формула приложения, не утверждённая универсальная норма.</small></label><label>Прогноз, шт./нед.<input name="forecast" type="number" min="0" step="0.1" placeholder="По весам: ${f(r.forecast.raw)}" value="${ov.forecast===null||ov.forecast===undefined?'':esc(ov.forecast)}"><small>Ручная оценка заменяет взвешенный прогноз только для этого товара.</small></label></div><label>Продажи −4 / −3 / −2 / −1<span class="sales-values" style="display:block;margin:6px 0">${p.sales.map(f).join(' / ')}</span></label><div><label>Промонедели для исключения из обычного спроса</label><div class="promo-checks" style="margin-top:8px">${[0,1,2,3].map(i=>`<label><input name="promo${i}" type="checkbox" ${(ov.promoWeeks||[])[i]?'checked':''}>−${4-i}</label>`).join('')}</div><small class="muted" style="font-size:9px">Размечайте по известным датам акции. Границы недель не угадываются.</small></div>${p.incoming>0?`<label>Дата едущей партии<input name="incomingDate" type="date" value="${esc(r.zero.incomingDate)}"><small>Все поставки по четвергам; текущая дата — допущение, проверьте её.</small></label>`:''}<div class="info-note">По умолчанию сохраняем достаточный исходный Web. Минимальная модель — ориентир для отдельного сокращения, не обязательное снижение каждого заказа. Для вашей стратегии задайте цель/процент. Очистка пиков выключена.</div><button type="submit" class="button">Пересчитать предложение</button></form><p class="muted" style="margin-top:10px;font-size:10px">Минимальная модель: база ${f(r.baseTarget)} → цель ${f(r.target)} → недостача ${f(r.needed)} → ${f(r.minimumQuantity)} шт. ${r.action==='keep'?'Достаточный Web сохраняем.':''}</p></div><div class="detail-section"><h3>Почему такое предложение</h3><ul class="explanation">${r.reasons.map(w=>`<li>${esc(w)}</li>`).join('')}</ul></div><div class="decision-panel"><div class="decision-actions"><button class="button ${r.action==='keep'?'primary':''}" id="keep-source" ${keepError?'disabled':''} title="${esc(keepError||'Не создаёт ручной корректировки')}">Оставить исходный · ${f(r.source)}</button><button class="button primary" id="apply-proposal" ${r.review||r.action==='keep'?'disabled title="Изменение не требуется либо нужны уточнения; используйте исходный Web или явную корректировку"':''}>${r.action==='keep'?'Изменение не требуется':r.action==='manual'?'Нужно уточнение':'Принять · '+f(r.quantity)}</button></div>${r.canReduce?`<button id="use-minimum" class="text-button">Отдельно рассмотреть сокращение до ${f(r.minimumQuantity)}</button>`:''}<form id="manual-form" class="manual-form" novalidate><label>Своя корректировка, шт.<input name="quantity" type="number" min="0" step="${p.batch||1}" value="${f(previewQ).replace(/[\s\u00a0]/g,'').replace(',','.')}" required></label><button type="submit" class="button">Применить</button></form>${keepError?`<p class="muted" style="font-size:10px;margin-top:8px">Оставить положительный исходный нельзя: ${esc(keepError)}</p>`:''}${d?`<p class="status approved" style="margin-top:12px">✓ Согласовано: ${d.kind==='keep'?'оставить исходный':f(d.quantity)+' шт.'}</p><button id="reset-decision" class="text-button">Снять подтверждение</button>`:''}</div><details class="source-data"><summary>Все исходные показатели</summary><dl>${fields.map(([k,v])=>`<dt>${esc(k)}</dt><dd>${esc(v===''?'—':v)}</dd>`).join('')}</dl></details></div>`;
     $('drawer').hidden = false; $('drawer-shade').hidden = false;
   }
   function openDrawer(sku) { selected = sku; renderTable(); renderDrawer(); $('close-drawer').focus(); }
   function closeDrawer() { selected = null; $('drawer').hidden = true; $('drawer-shade').hidden = true; if(state) renderTable(); }
   function setDecision(kind, quantity) {
-    try { E.decide(state,calculated,selected,kind,quantity); persist(); render(); toast('Решение сохранено'); }
+    try { E.decide(state,calculated,selected,kind,quantity); recalculate(); toast('Решение сохранено'); }
     catch(error) { fail(error); }
   }
   async function fingerprint(buffer) {
@@ -139,7 +153,7 @@
       try { const stored=localStorage.getItem('sgate.v1.'+hash); if(stored) restored=E.restorePayload(order,JSON.parse(stored),false); }
       catch (_) { toast('Предыдущее автосохранение не подошло: исходные данные загружены заново',true); }
       state = restored || fresh; selected=null; page=0; filter='pending';query='';$('search').value='';
-      recalculate(); toast(restored?'Заказ загружен, настройки восстановлены. Подтверждения другой даты сняты':'Заказ загружен: '+money.format(order.products.length)+' товаров');
+      recalculate(); toast(restored?restored.migratedFrom?'Правила обновлены: настройки сохранены, старые подтверждения сняты':'Заказ загружен, настройки восстановлены. Подтверждения другой даты сняты':'Заказ загружен: '+money.format(order.products.length)+' товаров');
     } catch(error) { fail(error); }
     finally { busy(false); $('file-input').value=''; }
   }
@@ -163,7 +177,7 @@
   function openExport() {
     try {
       const rows=E.changeRows(state,calculated),m=calculated.metrics;
-      $('export-summary').innerHTML=`<p><strong>${rows.length}</strong> подтверждённых изменений для ввода.</p><p class="muted">Согласовано ${m.approved} из ${m.total}. Непросмотренные товары не входят в список корректировок и сохраняют исходные количества.</p>`;
+      $('export-summary').innerHTML=`<p><strong>${rows.length}</strong> подтверждённых изменений для ввода.</p><p class="muted">Осталось ${E.queueItems(state,calculated).length} случаев в очереди внимания. ${m.approved} решений подтверждено. Остальные товары сохраняют исходные количества; подтверждать все ${m.total} строк не требуется.</p>`;
       $('export-csv').disabled=!rows.length;
       $('export-dialog').showModal();
     } catch(error){fail(error);}
@@ -173,7 +187,7 @@
       const wb=XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(exportRows()),'Изменения для ввода');
       const audit=[['Артикул','Товар','Стратегия','Прогноз в неделю','Остаток','Едет','Исходный','Предложено','Согласовано','Действие','Куб товара','Куб магазина','Замечания']];
-      for(const p of state.order.products){const r=calculated.results.get(p.sku),d=approved(p)?state.decisions[p.sku]:null;audit.push([p.sku,p.name,r.mode,r.demand,p.stock,p.incoming,r.source,r.quantity,d?d.quantity:'',d?d.kind:'не проверен',p.productCube,p.storeCube,r.warnings.join('; ')]);}
+      for(const p of state.order.products){const r=calculated.results.get(p.sku),d=approved(p)?state.decisions[p.sku]:null;audit.push([p.sku,p.name,r.mode,r.demand,p.stock,p.incoming,r.source,r.action==='manual'?r.attention.text:r.quantity,d?d.quantity:'',d?d.kind:r.attention.required?'нужно внимание':'без изменений',p.productCube,p.storeCube,r.warnings.join('; ')]);}
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(audit),'Проверка заказа');
       const meta=[['Дата расчёта',state.settings.orderDate],['Ближайшая поставка',calculated.ctx.cal.first],['Проверка до',calculated.ctx.cal.second],['Источник',state.order.metadata.name],['Отпечаток',state.order.metadata.fingerprint],['Версия правил',E.VERSION],['Веса недель','10 / 20 / 30 / 40%'],['Примечание','Только подтверждённые изменения переносятся вручную. Отправка логистам — человеком.']];
       XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(meta),'Параметры');
@@ -198,7 +212,7 @@
       rows.push({number:8+i,cells:Object.fromEntries(headers.map((h,j)=>[XLSX.utils.encode_col(j),values[h]===undefined?'':values[h]]))});
     });
     state=E.newSession(E.parseRows(rows,{name:'Демонстрационный заказ',fingerprint:'demo-v1',demo:true}),{...defaults});
-    selected=null;filter='all';query='';$('search').value='';page=0;recalculate();
+    selected=null;filter='pending';query='';$('search').value='';page=0;recalculate();
   }
   $('dropzone').addEventListener('click',()=>$('file-input').click());
   $('dropzone').addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();$('file-input').click();}});
@@ -221,8 +235,8 @@
       $('settings-dialog').close();toast('Параметры применены');
     }catch(error){fail(error);}
   });
-  $('filters').addEventListener('click',e=>{const b=e.target.closest('[data-filter]');if(b){filter=b.dataset.filter;page=0;render();}});
-  $('search').addEventListener('input',e=>{query=e.target.value;page=0;clearTimeout(searchTimer);searchTimer=setTimeout(renderTable,120);});
+  for(const id of ['filters','triage-summary']) $(id).addEventListener('click',e=>{const b=e.target.closest('[data-filter]');if(b){filter=b.dataset.filter;page=0;render();}});
+  $('search').addEventListener('input',e=>{if(e.target.value.trim()&&!query.trim())filter='all';query=e.target.value;page=0;clearTimeout(searchTimer);searchTimer=setTimeout(render,120);});
   $('sort').addEventListener('change',e=>{sort=e.target.value;page=0;renderTable();});
   $('prev-page').addEventListener('click',()=>{page--;renderTable();});$('next-page').addEventListener('click',()=>{page++;renderTable();});
   $('product-rows').addEventListener('click',e=>{const row=e.target.closest('[data-sku]');if(row)openDrawer(row.dataset.sku);});
@@ -230,14 +244,19 @@
   $('drawer-shade').addEventListener('click',closeDrawer);
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&selected)closeDrawer();});
   $('drawer').addEventListener('click',e=>{
-    const id=e.target.closest('button')?.id;
+    const button=e.target.closest('button'), id=button?.id;
+    if(button?.dataset.openPeer)return openDrawer(button.dataset.openPeer);
+    if(button?.dataset.zeroPeer){try{E.decide(state,calculated,button.dataset.zeroPeer,'apply',0);recalculate();toast('Связанный артикул обнулён');}catch(error){fail(error);}return;}
+    if(id==='use-minimum'){const r=calculated.results.get(selected);state.overrides[selected]=E.normalizeOverride({...state.overrides[selected],mode:'auto',percent:0,baseTarget:r.target});recalculate();return;}
+    if(id==='clear-replacement'){delete state.replacementChoices[calculated.results.get(selected).group.id];recalculate();return;}
     if(id==='close-drawer')closeDrawer();
     if(id==='keep-source')setDecision('keep');
-    if(id==='apply-proposal')setDecision('apply',calculated.results.get(selected).quantity);
-    if(id==='reset-decision'){delete state.decisions[selected];persist();render();}
+    if(id==='apply-proposal'){const r=calculated.results.get(selected);if(!r.review)setDecision(r.action==='keep'?'keep':'apply',r.quantity);}
+    if(id==='reset-decision'){delete state.decisions[selected];recalculate();}
   });
   $('drawer').addEventListener('submit',e=>{
     e.preventDefault();
+    if(e.target.id==='replacement-form'){try{E.chooseReplacement(state,calculated,calculated.results.get(selected).group.id,String(new FormData(e.target).get('chosen')));recalculate();toast('Выбор сохранён; проверьте количества в паре');}catch(error){fail(error);}return;}
     if(e.target.id==='manual-form'){const value=new FormData(e.target).get('quantity');if(E.blank(value))return toast('Введите количество. Для обнуления введите 0',true);return setDecision('apply',Number(value));}
     if(e.target.id!=='strategy-form')return;
     try{const form=new FormData(e.target),raw={mode:form.get('mode'),percent:form.get('percent'),baseTarget:form.get('baseTarget'),forecast:form.get('forecast'),promoWeeks:[0,1,2,3].map(i=>form.has('promo'+i))};
@@ -249,15 +268,15 @@
   });
   $('approve-zeros').addEventListener('click',()=>{
     if(!state)return;let count=0;
-    for(const p of state.order.products){const r=calculated.results.get(p.sku);if(!r.cube.allowed&&r.cube.known&&!approved(p)){E.decide(state,calculated,p.sku,'apply',0);count++;}}
-    persist();render();toast(`Согласовано ${count} запретов с количеством 0`);
+    for(const p of state.order.products){const r=calculated.results.get(p.sku);if(!r.cube.allowed&&r.cube.known&&r.source>0&&!approved(p)){E.decide(state,calculated,p.sku,'apply',0);count++;}}
+    recalculate();toast(`Согласовано ${count} запретов с количеством 0`);
   });
   $('export-csv').addEventListener('click',()=>{try{download('sgate-changes-'+state.settings.orderDate+'.csv',E.csv(exportRows()),'text/csv;charset=utf-8');}catch(error){fail(error);}});
   $('export-xlsx').addEventListener('click',exportXLSX);
   $('session-input').addEventListener('change',async e=>{
     const file=e.target.files[0];if(!file)return;busy(true);
     try{if(file.size>80*1024*1024)throw new Error('Сессия больше 80 МБ');await nextPaint();const restored=E.restoreSnapshot(JSON.parse(await file.text()));
-      state=restored;selected=null;page=0;query='';$('search').value='';filter='pending';recalculate();toast('Сессия открыта. Проверьте дату расчёта');
+      state=restored;selected=null;page=0;query='';$('search').value='';filter='pending';recalculate();toast(restored.migratedFrom?'Сессия обновлена: настройки сохранены, прежние подтверждения сняты':'Сессия открыта. Проверьте дату расчёта');
     }catch(error){fail(error);}finally{busy(false);e.target.value='';}
   });
   document.addEventListener('visibilitychange',()=>{if(!document.hidden&&state)render();});
