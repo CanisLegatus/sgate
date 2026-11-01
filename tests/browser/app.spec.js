@@ -1,133 +1,70 @@
-const { test, expect } = require('@playwright/test');
-const fs = require('node:fs');
-const path = require('node:path');
-const { pathToFileURL } = require('node:url');
-const XLSX = require('../../vendor/xlsx.full.min.js');
-const root = path.resolve(__dirname, '../..');
-const appURL = pathToFileURL(path.join(root, 'sgate.html')).href;
-async function open(page) {
-  const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  const network=[];page.on('request',req=>{if(/^https?:/.test(req.url()))network.push(req.url());});
-  await page.goto(appURL);
-  await expect(page.getByRole('heading',{name:'Заказ под контролем.'})).toBeVisible();
-  return {errors,network};
-}
-async function demo(page){await page.getByRole('button',{name:'Посмотреть на демо-данных'}).click();await expect(page.locator('#workspace')).toBeVisible();}
+const {test,expect}=require('@playwright/test');
+const fs=require('node:fs'),path=require('node:path'),{pathToFileURL}=require('node:url'),XLSX=require('../../vendor/xlsx.full.min.js');
+const root=path.resolve(__dirname,'../..'),appURL=pathToFileURL(path.join(root,'sgate.html')).href;
+async function open(page){const errors=[],network=[];page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(/^https?:/.test(r.url()))network.push(r.url());});await page.goto(appURL);await expect(page.getByRole('heading',{name:'Заказ под контролем.'})).toBeVisible();return{errors,network};}
+async function demo(page){await page.locator('#demo-button').click();await expect(page.locator('#workspace')).toBeVisible();}
 async function select(page,sku){await page.locator('#search').fill(sku);await page.locator(`#product-rows tr[data-sku="${sku}"]`).click();await expect(page.locator('#drawer')).toBeVisible();}
 async function close(page){await page.locator('#close-drawer').click();}
+async function qty(page,q){await page.locator('#manual-form input').fill(String(q));await page.locator('#manual-form button').click();}
+async function fixedDate(page){await page.locator('#settings-button').click();await page.locator('[name=orderDate]').fill('2026-11-02');await page.locator('[name=incomingDate]').fill('2026-11-05');await page.locator('#settings-form button[type=submit]').click();}
+async function loadFull(page){await fixedDate(page);await page.locator('#file-input').setInputFiles(path.join(root,'example-files/order-full.xlsx'));await expect(page.locator('#workspace')).toBeVisible({timeout:60000});}
 
-test('standalone opens offline, interactive strategy computes percent and validates own quantity',async({page})=>{
-  const {errors,network}=await open(page);await demo(page);await select(page,'D-003');
-  await page.locator('#strategy-form select[name=mode]').selectOption('increase');
-  await page.locator('#strategy-form input[name=baseTarget]').fill('100');
-  await page.locator('#strategy-form input[name=percent]').fill('10');
-  await page.getByRole('button',{name:'Пересчитать предложение'}).click();
-  await expect(page.locator('#drawer')).toContainText('цель 110');
-  await page.locator('#manual-form input').fill('1');await page.locator('#manual-form button').click();
-  await expect(page.locator('#toast')).toContainText('кратно 8');
-  await page.locator('#keep-source').click();await expect(page.locator('#drawer')).toContainText('Согласовано: оставить исходный');
-  expect(await page.evaluate(()=>SGateApp.getState().decisions['D-003'].quantity)).toBe(8);
-  await close(page);
-  fs.mkdirSync(path.join(root,'analysis/browser'),{recursive:true});
-  await page.screenshot({path:path.join(root,'analysis/browser/workspace.png'),fullPage:true});
-  expect(errors).toEqual([]);expect(network).toEqual([]);
+test('import immediately applies all changes and exports explicit zero without approvals',async({page})=>{
+ const {errors,network}=await open(page);await demo(page);
+ expect(await page.evaluate(()=>SGateApp.getCalculation().results.get('D-001').quantity)).toBe(0);
+ expect(await page.evaluate(()=>SGateApp.getState().decisions)).toBeUndefined();
+ await expect(page.locator('#keep-source,#apply-proposal,#approve-zeros')).toHaveCount(0);
+ await page.locator('#export-button').click();await expect(page.locator('#export-summary')).toContainText('уже включено');
+ const csvDownload=page.waitForEvent('download');await page.locator('#export-csv').click();const csv=fs.readFileSync(await(await csvDownload).path(),'utf8');expect(csv).toContain('D-001');expect(csv).toMatch(/;0;/);
+ const excelDownload=page.waitForEvent('download');await page.locator('#export-xlsx').click();const wb=XLSX.read(fs.readFileSync(await(await excelDownload).path()),{type:'buffer'});expect(wb.SheetNames).toEqual(['Изменения для ввода','Наш заказ','Проблемные','Параметры']);
+ expect(XLSX.utils.sheet_to_json(wb.Sheets['Изменения для ввода'],{header:1}).find(r=>r[0]==='D-001')[3]).toBe(0);
+ expect(errors).toEqual([]);expect(network).toEqual([]);
 });
 
-test('explicit zero survives CSV; full JSON session restores accepted decisions',async({page})=>{
-  const {errors}=await open(page);await demo(page);await select(page,'D-001');
-  await expect(page.locator('#keep-source')).toBeDisabled();
-  await page.locator('#apply-proposal').click();await close(page);
-  await page.locator('#export-button').click();
-  const dl=page.waitForEvent('download');await page.locator('#export-csv').click();const csv=await(await dl).path();
-  const contents=fs.readFileSync(csv,'utf8');expect(contents).toContain('D-001');expect(contents).toMatch(/;0;/);
-  const excelDL=page.waitForEvent('download');await page.locator('#export-xlsx').click();const excel=await(await excelDL).path();
-  const workbook=XLSX.read(fs.readFileSync(excel),{type:'buffer'});
-  expect(workbook.SheetNames).toEqual(['Изменения для ввода','Проверка заказа','Параметры']);
-  const exported=XLSX.utils.sheet_to_json(workbook.Sheets['Изменения для ввода'],{header:1});expect(exported[1][0]).toBe('D-001');expect(exported[1][3]).toBe(0);
-  await page.locator('[data-close="export-dialog"]').click();
-  const sessionDL=page.waitForEvent('download');await page.locator('#save-button').click();const backup=await(await sessionDL).path();
-  await page.reload();await page.locator('#session-input').setInputFiles({name:'session.json',mimeType:'application/json',buffer:fs.readFileSync(backup)});
-  await expect(page.locator('#workspace')).toBeVisible();
-  expect(await page.evaluate(()=>SGateApp.getState().decisions['D-001'].quantity)).toBe(0);
-  expect(errors).toEqual([]);
+test('manual quantity immediately changes order and export; reset returns automatic calculation',async({page})=>{
+ const {errors}=await open(page);await demo(page);await select(page,'D-003');await qty(page,1);await expect(page.locator('#toast')).toContainText('кратно 8');
+ await qty(page,16);await expect(page.locator('#current-quantity')).toHaveText('16');
+ expect(await page.evaluate(()=>SGate.changeRows(SGateApp.getState(),SGateApp.getCalculation()).find(r=>r.sku==='D-003').quantity)).toBe(16);
+ await page.locator('#reset-quantity').click();await expect(page.locator('#current-quantity')).toHaveText('0');expect(await page.evaluate(()=>SGateApp.getState().manualQuantities['D-003'])).toBeUndefined();expect(errors).toEqual([]);
 });
 
-test('malformed session leaves loaded order intact; date change invalidates decisions',async({page})=>{
-  await open(page);await demo(page);await select(page,'D-003');await page.locator('#keep-source').click();await close(page);
-  const invalid=await page.evaluate(()=>{const s=SGate.snapshot(SGateApp.getState());s.decisions['D-003'].quantity=99;return JSON.stringify(s);});
-  await page.locator('#session-input').setInputFiles({name:'bad.json',mimeType:'application/json',buffer:Buffer.from(invalid)});
-  await expect(page.locator('#toast')).toContainText('исходное количество');
-  expect(await page.evaluate(()=>SGateApp.getState().decisions['D-003'].quantity)).toBe(8);
-  await page.locator('#settings-button').click();
-  await page.locator('#settings-form input[name=orderDate]').fill('2026-11-02');
-  await page.locator('#settings-form input[name=incomingDate]').fill('2026-11-05');
-  await page.locator('#settings-form button[type=submit]').click();
-  // In case the runtime day was already Nov 2, change the date once more.
-  await page.locator('#settings-button').click();await page.locator('#settings-form input[name=orderDate]').fill('2026-11-03');await page.locator('#settings-form input[name=incomingDate]').fill('2026-11-05');await page.locator('#settings-form button[type=submit]').click();
-  expect(await page.evaluate(()=>Object.keys(SGateApp.getState().decisions).length)).toBe(0);
+test('global strategy and percent recalculate every item immediately and clear manual quantities',async({page})=>{
+ await open(page);await demo(page);await select(page,'D-003');
+ await page.locator('#strategy-form input[name=baseTarget]').fill('100');await page.locator('#strategy-form button').click();await qty(page,16);await close(page);
+ await page.locator('#global-strategy').selectOption('increase');await page.locator('#global-percent').fill('10');await page.locator('#global-percent').dispatchEvent('change');
+ const facts=await page.evaluate(()=>({manual:SGateApp.getState().manualQuantities,modes:[...SGateApp.getCalculation().results.values()].map(r=>r.mode),target:SGateApp.getCalculation().results.get('D-003').target}));
+ expect(facts.manual).toEqual({});expect(facts.modes.every(m=>m==='increase')).toBe(true);expect(facts.target).toBe(110);
+ await select(page,'D-003');await expect(page.locator('#drawer')).toContainText('цель 110');await close(page);
+ await page.locator('#global-strategy').selectOption('decrease');expect(await page.evaluate(()=>[...SGateApp.getCalculation().results.values()].every(r=>r.mode==='decrease'))).toBe(true);
 });
 
-test('demo has correct newest sales and works on narrow screen',async({page})=>{
-  await page.setViewportSize({width:390,height:844});await open(page);
-  fs.mkdirSync(path.join(root,'analysis/browser'),{recursive:true});await page.screenshot({path:path.join(root,'analysis/browser/mobile-welcome.png'),fullPage:true});
-  await demo(page);
-  expect(await page.evaluate(()=>SGateApp.getState().order.products.find(p=>p.sku==='D-005').sales)).toEqual([4,5,40,5]);
-  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
-  await select(page,'D-002');await expect(page.locator('#drawer')).toBeVisible();
+test('JSON session restores strategy and manual values; corrupt restore leaves live order intact',async({page})=>{
+ await open(page);await demo(page);await select(page,'D-003');await qty(page,16);await close(page);
+ const bad=await page.evaluate(()=>{const s=SGate.snapshot(SGateApp.getState());s.manualQuantities['D-003']=1;return JSON.stringify(s);});
+ await page.locator('#session-input').setInputFiles({name:'bad.json',mimeType:'application/json',buffer:Buffer.from(bad)});await expect(page.locator('#toast')).toContainText('кратно 8');expect(await page.evaluate(()=>SGateApp.getState().manualQuantities['D-003'])).toBe(16);
+ const downloaded=page.waitForEvent('download');await page.locator('#save-button').click();const backup=fs.readFileSync(await(await downloaded).path());await page.reload();
+ await page.locator('#session-input').setInputFiles({name:'session.json',mimeType:'application/json',buffer:backup});await expect(page.locator('#workspace')).toBeVisible();expect(await page.evaluate(()=>SGateApp.getCalculation().results.get('D-003').quantity)).toBe(16);
 });
 
-test('real full Excel: imports all cells despite dimension, correct metrics and preserves Web conflicts',async({page})=>{
-  test.skip(!fs.existsSync(path.join(root,'example-files/order-full.xlsx')),'Local Excel is not published');
-  const {errors,network}=await open(page);await page.locator('#file-input').setInputFiles(path.join(root,'example-files/order-full.xlsx'));
-  await expect(page.locator('#workspace')).toBeVisible({timeout:60000});
-  const facts=await page.evaluate(()=>{const s=SGateApp.getState(),c=SGateApp.getCalculation(),counts={};for(const r of c.results.values())counts[r.cube.code]=(counts[r.cube.code]||0)+1;return{products:s.order.products.length,counts,active:c.metrics.active,value:c.metrics.value};});
-  expect(facts).toEqual({products:10626,counts:{explicit_block:3514,inside:6801,closed:235,outside:76},active:7665,value:18156991.3});
-  await select(page,'398-875');await page.locator('#keep-source').click();
-  expect(await page.evaluate(()=>SGateApp.getState().decisions['398-875'].quantity)).toBe(5);
-  await page.locator('#manual-form input').fill('5');await page.locator('#manual-form button').click();await expect(page.locator('#toast')).toContainText('кратно 4');
-  await page.locator('#manual-form input').fill('4');await page.locator('#manual-form button').click();
-  expect(await page.evaluate(()=>SGateApp.getState().decisions['398-875'].quantity)).toBe(4);
-  await close(page);await page.locator('[data-filter="all"]').click();await page.locator('#search').fill('');await expect(page.locator('#product-rows tr')).toHaveCount(75);
-  await page.screenshot({path:path.join(root,'analysis/browser/full-order.png'),fullPage:true});
-  await select(page,'249-110');await expect(page.locator('#drawer')).toContainText('отрицательные продажи');await expect(page.locator('#apply-proposal')).toBeDisabled();
-  await page.locator('#strategy-form input[name=forecast]').fill('2');await page.getByRole('button',{name:'Пересчитать предложение'}).click();await expect(page.locator('#keep-source')).toBeEnabled();expect(await page.evaluate(()=>SGateApp.getCalculation().results.get('249-110').review)).toBe(false);
-  expect(errors).toEqual([]);expect(network).toEqual([]);
+test('real report: automatic lower/raise/zero lists, example SKU, cycle and no duplicate orders',async({page})=>{
+ test.skip(!fs.existsSync(path.join(root,'example-files/order-full.xlsx')),'Local Excel is not published');
+ const {errors,network}=await open(page);await loadFull(page);
+ const facts=await page.evaluate(()=>{const c=SGateApp.getCalculation();return{total:c.metrics.total,changes:c.metrics.changes,unresolved:c.metrics.unresolved,value:c.metrics.value,q: c.results.get('967-001').quantity,mop:c.results.get('444-268').quantity};});
+ expect(facts).toEqual({total:10626,changes:1415,unresolved:354,value:18156991.3,q:0,mop:16});
+ for(const [key,count]of [['down',148],['up',3],['zero',1264]]){expect(Number((await page.locator(`#filters [data-filter=${key}] span`).textContent()).replace(/\s/g,''))).toBe(count);}
+ await page.locator('#filters [data-filter=zero]').click();await select(page,'967-001');await expect(page.locator('#current-quantity')).toHaveText('0');await close(page);
+ await select(page,'655-001');await expect(page.locator('.replacement-panel')).toContainText('Взаимная замена');await expect(page.locator('#current-quantity')).toHaveText('Не рассчитан');
+ await page.locator('#replacement-form select').selectOption('655-001');await page.locator('#replacement-form button').click();await expect(page.locator('#current-quantity')).toHaveText('2');
+ await page.locator('[data-open-peer="655-007"]').click();await qty(page,2);expect(await page.evaluate(()=>SGateApp.getCalculation().results.get('655-001').quantity)).toBe(0);await expect(page.locator('#current-quantity')).toHaveText('2');await close(page);
+ await page.locator('#search').fill('');await page.locator('#filters [data-filter=changes]').click();fs.mkdirSync(path.join(root,'analysis/browser'),{recursive:true});await page.screenshot({path:path.join(root,'analysis/browser/automatic-order.png')});
+ await select(page,'249-110');await expect(page.locator('#drawer')).toContainText('отрицательные продажи');await page.locator('#strategy-form input[name=forecast]').fill('2');await page.locator('#strategy-form button').click();expect(await page.evaluate(()=>SGateApp.getCalculation().results.get('249-110').quantity)).not.toBeNull();
+ expect(errors).toEqual([]);expect(network).toEqual([]);
 });
 
-test('old cut file safely shows missing cube and never offers positive correction',async({page})=>{
-  test.skip(!fs.existsSync(path.join(root,'example-files/order-cut.xlsx')),'Local Excel is not published');
-  await open(page);await page.locator('#file-input').setInputFiles(path.join(root,'example-files/order-cut.xlsx'));await expect(page.locator('#workspace')).toBeVisible();
-  await expect(page.locator('#notice')).toContainText('нет «КУБ»');
-  expect(await page.evaluate(()=>[...SGateApp.getCalculation().results.values()].every(r=>r.quantity===0))).toBe(true);
+test('old cut never converts unknown eligibility into a silent zero',async({page})=>{
+ test.skip(!fs.existsSync(path.join(root,'example-files/order-cut.xlsx')),'Local Excel is not published');await open(page);await page.locator('#file-input').setInputFiles(path.join(root,'example-files/order-cut.xlsx'));await expect(page.locator('#workspace')).toBeVisible();await expect(page.locator('#notice')).toContainText('нет «КУБ»');expect(await page.evaluate(()=>[...SGateApp.getCalculation().results.values()].every(r=>r.blocked?r.quantity===0:r.quantity===null))).toBe(true);
 });
 
-
-test('main queue excludes routine rows; mop preserves Web; cyclic pair has explicit safe selection',async({page})=>{
-  test.skip(!fs.existsSync(path.join(root,'example-files/order-full.xlsx')),'Local Excel is not published');
-  const {errors,network}=await open(page);
-  await page.locator('#settings-button').click();
-  await page.locator('#settings-form input[name=orderDate]').fill('2026-11-02');
-  await page.locator('#settings-form input[name=incomingDate]').fill('2026-11-05');
-  await page.locator('#settings-form button[type=submit]').click();
-  await page.locator('#file-input').setInputFiles(path.join(root,'example-files/order-full.xlsx'));
-  await expect(page.locator('#workspace')).toBeVisible({timeout:60000});
-  await expect(page.locator('[data-filter=pending]')).toContainText('128');
-  await expect(page.locator('#product-rows')).not.toContainText('444-268');
-  await page.screenshot({path:path.join(root,'analysis/browser/attention-queue.png'),fullPage:true});
-  await select(page,'444-268');await expect(page.locator('#drawer')).toContainText('Достаточный Web сохраняем.');
-  await expect(page.locator('#keep-source')).toContainText('40');await expect(page.locator('#apply-proposal')).toBeDisabled();
-  await close(page);await select(page,'655-001');await expect(page.locator('.replacement-panel')).toContainText('Взаимная замена');
-  await expect(page.locator('.replacement-panel')).toContainText('меняется на 655-001');
-  await expect(page.locator('.replacement-panel')).toContainText('меняется на 655-007');
-  await expect(page.locator('#keep-source')).toBeEnabled();
-  await page.locator('#replacement-form select').selectOption('655-007');await page.locator('#replacement-form button').click();
-  await expect(page.locator('[data-zero-peer="655-001"]')).toHaveCount(0);
-  await page.locator('[data-open-peer="655-007"]').click();
-  await page.locator('#manual-form input').fill('2');await page.locator('#manual-form button').click();
-  await expect(page.locator('#toast')).toContainText('Сначала согласуйте');
-  await page.locator('[data-zero-peer="655-001"]').click();
-  await page.locator('#manual-form input').fill('2');await page.locator('#manual-form button').click();
-  expect(await page.evaluate(()=>SGateApp.getState().decisions['655-001'].quantity)).toBe(0);
-  expect(await page.evaluate(()=>SGateApp.getState().decisions['655-007'].quantity)).toBe(2);
-  expect(errors.filter(e=>!e.includes('Сначала согласуйте'))).toEqual([]);expect(network).toEqual([]);
+test('mobile layout contains global controls and searchable quantity editor',async({page})=>{
+ await page.setViewportSize({width:390,height:844});const{errors}=await open(page);await demo(page);expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await expect(page.locator('#global-strategy')).toBeVisible();await select(page,'D-003');await qty(page,16);await expect(page.locator('#current-quantity')).toHaveText('16');expect(errors).toEqual([]);
 });

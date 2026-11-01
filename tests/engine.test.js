@@ -14,6 +14,10 @@ function calculate(p, overrides = {}, config = {}, others = []) {
   const ctx=E.createContext(order,{orderDate:'2026-10-29',incomingDate:'2026-11-05',coverageWeeks:1,...config});
   return { ctx, r:E.compute(p,ctx,overrides) };
 }
+const hasFiles=fs.existsSync('example-files/order-full.xlsx');let full;
+function realOrder(){return full||(full=I.parseWorkbook(XLSX.read(fs.readFileSync('example-files/order-full.xlsx'),{type:'buffer',nodim:true}),{name:'local',fingerprint:'local-full'}));}
+function localState(){return S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1});}
+
 test('weights, zero weeks, and no silent spike cleaning',()=>{
   assert.equal(E.forecast(product({sales:[2,4,6,8]})).value,6);
   assert.equal(E.forecast(product({sales:[0,0,0,4]})).value,1.6);
@@ -37,11 +41,6 @@ test('exact decimal cube comparison and absolute bans',()=>{
   assert.equal(E.cubeEligibility(product({hasStoreCube:false})).known,false);
   for(const pc of ['ЗО','ЗО вр','ЗО сеть','!ВНЕ_АМ-1'])assert.equal(E.cubeEligibility(product({productCube:pc})).code,'explicit_block');
   assert.equal(E.cubeEligibility(product({productCube:'СС_ЗОЛОТО-1',storeCube:'СС_ЗОЛОТО-1'})).allowed,true);
-});
-test('blocked protected SKU cannot be ordered even when keeping Web',()=>{
-  const p=product({productCube:'ЗО',commercialA:'И-индикатор',webRecommendation:56}),{ctx,r}=calculate(p);
-  assert.equal(r.quantity,0);assert.match(E.checkDecision(p,r,'keep',undefined,ctx,{}),/Абсолютный/);
-  assert.equal(E.checkDecision(p,r,'apply',0,ctx,{}),null);
 });
 test('B: today 70 -> 30 -> shortage 10; hold strategy buys 56 without per-SKU exceptions',()=>{
   const p=product({priceCategory:'ПЦ'}),{r}=calculate(p,{mode:'hold'});
@@ -75,13 +74,6 @@ test('lost sales are not treated as backlog to refill twice',()=>{
   const p=product({stock:0,sales:[10,10,10,10],batch:1});const {r}=calculate(p);
   assert.equal(r.zero.lostBefore,10);assert.equal(r.quantity,10);assert.equal(r.projection.firstAfter,10);
 });
-test('corrections respect batch and warehouse while accepted Web is untouched',()=>{
-  const p=product({webRecommendation:5,batch:4,centralStock:5}),{ctx,r}=calculate(p);
-  assert.equal(E.checkDecision(p,r,'keep',undefined,ctx,{}),null);
-  assert.match(E.checkDecision(p,r,'apply',5,ctx,{}),/кратно/);
-  assert.equal(E.checkDecision(p,r,'apply',4,ctx,{}),null);
-  assert.match(E.checkDecision(p,r,'apply',8,ctx,{}),/складе/);
-});
 test('not-for-sale flag is ignored; MTZ does not inflate demand',()=>{
   const p=product({tradeCategory:'не для продажи',mtz:100000});
   assert.equal(calculate(p).r.quantity,calculate(product({mtz:0})).r.quantity);
@@ -94,12 +86,6 @@ test('replacement direction and zero-in-store switch to new SKU',()=>{
   old.stock=1;const ctx2=E.createContext({products:[old,next]},{orderDate:'2026-10-29'});
   assert.equal(E.compute(next,ctx2).replacement.allowed,false);
 });
-test('replacement pair may not be ordered twice, including unreviewed original',()=>{
-  const old=product({sku:'OLD',comment:'меняется на NEW'}),next=product({sku:'NEW',comment:'вместо OLD',webRecommendation:28});
-  const {ctx,r}=calculate(old,{}, {},[next]);
-  assert.match(E.checkDecision(old,r,'apply',28,ctx,{}),/В паре замен/);
-  assert.equal(E.checkDecision(old,r,'apply',28,ctx,{NEW:{quantity:0}}),null);
-});
 test('all correction invariants over many finite cases',()=>{
   for(const stock of [0,1,5,70])for(const k of [1,4,28])for(const warehouse of [0,1,5,1000]){
     const p=product({stock,batch:k,centralStock:warehouse});const {r}=calculate(p);
@@ -109,48 +95,6 @@ test('all correction invariants over many finite cases',()=>{
 });
 test('CSV keeps explicit numeric zero and escapes spreadsheet formula text',()=>{
   const csv=S.csv([['SKU','qty'],['=cmd',0]]);assert.match(csv,/'=cmd/);assert.match(csv,/;0/);
-});
-const hasFiles=fs.existsSync('example-files/order-full.xlsx');
-let full;
-function realOrder(){return full||(full=I.parseWorkbook(XLSX.read(fs.readFileSync('example-files/order-full.xlsx'),{type:'buffer',nodim:true}),{name:'local',fingerprint:'local-full'}));}
-test('actual full file: ignore broken dimension, exact cube audit and stock metrics',{skip:!hasFiles},()=>{
-  const order=realOrder();assert.equal(order.products.length,10626);assert.equal(order.metadata.groups,997);assert.equal(order.metadata.diagnostics.length,0);
-  const returns=order.products.find(p=>p.sku==='249-110');assert.deepEqual(returns.sales,[0,3,-1,0]);assert.equal(returns.stockDays,-600);
-  const state=S.newSession(order,{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1});const calc=S.calculate(state);
-  const counts={};for(const r of calc.results.values())counts[r.cube.code]=(counts[r.cube.code]||0)+1;
-  assert.deepEqual(counts,{explicit_block:3514,inside:6801,closed:235,outside:76});
-  assert.equal(calc.metrics.active,7665);assert.equal(calc.metrics.value,18156991.3);
-  for(const p of order.products){const r=calc.results.get(p.sku);if(r.action==='apply')assert.equal(E.validCorrection(p,r.quantity),null,p.sku);if(r.cube.known&&!r.cube.allowed)assert.equal(r.quantity,0,p.sku);}
-});
-test('seven user decisions remain representable, persist, and export only real changes',{skip:!hasFiles},()=>{
-  const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1}),calc=S.calculate(state);
-  const expected={'794-562':0,'732-099':1,'914-005':56,'770-059':2,'778-078':0,'313-385':6,'318-087':24};
-  for(const [sku,q]of Object.entries(expected))S.decide(state,calc,sku,q===calc.results.get(sku).source?'keep':'apply',q);
-  assert.equal(Object.keys(state.decisions).length,7);
-  const restored=S.restoreSnapshot(JSON.parse(JSON.stringify(S.snapshot(state))));
-  assert.equal(Object.keys(restored.decisions).length,7);
-  const changes=S.changeRows(restored,S.calculate(restored));
-  assert.equal(changes.length,3);assert.ok(changes.some(c=>c.sku==='794-562'&&c.quantity===0));
-});
-test('date change invalidates confirmations, corrupt snapshots are rejected atomically',{skip:!hasFiles},()=>{
-  const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1}),calc=S.calculate(state);
-  S.decide(state,calc,'914-005','apply',56);state.settings.orderDate='2026-11-03';
-  assert.equal(S.calculate(state).invalidated,1);
-  const snap=S.snapshot(state);snap.rows[0].cells.A={evil:'x'};
-  assert.throws(()=>S.restoreSnapshot(snap),/ячейки/);
-});
-test('old cut imports safely but missing store cube never permits positive decisions',{skip:!fs.existsSync('example-files/order-cut.xlsx')},()=>{
-  const order=I.parseWorkbook(XLSX.read(fs.readFileSync('example-files/order-cut.xlsx'),{type:'buffer',nodim:true}));assert.equal(order.products.length,9);
-  const state=S.newSession(order),calc=S.calculate(state);
-  for(const p of order.products){const r=calc.results.get(p.sku);assert.equal(r.quantity,0);assert.ok(E.checkDecision(p,r,'apply',p.batch,calc.ctx,{}));}
-});
-
-test('snapshot is detached: editing a backup cannot mutate live decisions or source cells',{skip:!hasFiles},()=>{
-  const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1}),calc=S.calculate(state);
-  S.decide(state,calc,'914-005','apply',56);
-  const copy=S.snapshot(state),original=state.order.rows[0].cells.A;
-  copy.decisions['914-005'].quantity=999;copy.rows[0].cells.A='changed';
-  assert.equal(state.decisions['914-005'].quantity,56);assert.equal(state.order.rows[0].cells.A,original);
 });
 
 test('negative weekly sales stay original and require manual interpretation, not zero filling',()=>{
@@ -168,44 +112,73 @@ test('unmapped promo does not silently extrapolate promotional sales into an aut
 });
 
 
-test('adequate Web remains unchanged; reduction and informational tags are optional',()=>{
-  const p=product({stock:15,sales:[9,17,17,21],batch:2,webRecommendation:40,promo:'А 23.10 - 30.10',commercialA:'И-индикатор'});
-  const {r}=calculate(p,{}, {orderDate:'2026-11-02'});
-  assert.equal(r.demand,17.8);assert.equal(r.quantity,40);assert.equal(r.action,'keep');assert.equal(r.review,false);
-  assert.equal(r.sourceRisk,false);assert.equal(r.attention.required,false);assert.equal(r.canReduce,true);
-  assert.equal(r.sourceProjection.secondBefore,29.571429);
-  assert.equal(calculate(p,{baseTarget:r.target},{orderDate:'2026-11-02'}).r.quantity,r.minimumQuantity);
-});
-test('attention checks Web coverage, not shortage in the no-order alternative',()=>{
-  const p=product({stock:70,webRecommendation:56,priceCategory:'ПЦ'}),{r}=calculate(p);
-  assert.ok(r.zero.secondSigned<0);assert.equal(r.attention.required,false);assert.equal(r.quantity,56);
-  const shortage=calculate({...p,webRecommendation:0}).r;
-  assert.equal(shortage.attention.kind,'risk');assert.ok(shortage.quantity>0);
-  const forbidden=calculate({...p,productCube:'ЗО',webRecommendation:0}).r;
-  assert.equal(forbidden.attention.required,false);assert.equal(forbidden.quantity,0);
+test('automatic need is independent of whether Web already covers the horizon',()=>{
+  const p=product({stock:70,webRecommendation:56,priceCategory:'ПЦ'}),a=calculate(p).r,b=calculate({...p,webRecommendation:0}).r;
+  assert.equal(a.quantity,b.quantity);assert.ok(a.zero.secondSigned<0);assert.equal(a.sourceRisk,false);assert.equal(b.sourceRisk,true);
 });
 test('complementary replacement comments form one directed relation, not a cycle',()=>{
   const a=product({sku:'OLD',comment:'меняется на NEW'}),b=product({sku:'NEW',comment:'вместо OLD'});
   const {ctx}=calculate(a,{}, {},[b]);const g=ctx.groupBySku.get('OLD');
   assert.equal(g.cyclic,false);assert.equal(g.ambiguous,false);assert.equal(g.links.length,1);
 });
-test('real mop and cyclic replacements: one queue case, explicit choice, no double order, persistence',{skip:!hasFiles},()=>{
-  const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1});let c=S.calculate(state);
-  assert.equal(c.results.get('444-268').quantity,40);assert.equal(c.results.get('444-268').attention.required,false);
-  assert.equal(S.queueItems(state,c).length,128);
-  const group=c.ctx.groupBySku.get('655-001');assert.equal(group.cyclic,true);assert.equal(group.links.length,2);
-  assert.equal(S.queueItems(state,c).filter(p=>group.members.includes(p.sku)).length,1);
-  S.decide(state,c,'655-001','keep');assert.equal(state.decisions['655-001'].quantity,6);
-  S.chooseReplacement(state,c,group.id,'655-007');c=S.calculate(state);assert.equal(state.decisions['655-001'],undefined);
-  assert.throws(()=>S.decide(state,c,'655-007','apply',2),/Сначала согласуйте/);
-  S.decide(state,c,'655-001','apply',0);c=S.calculate(state);S.decide(state,c,'655-007','apply',2);
-  const restored=S.restoreSnapshot(JSON.parse(JSON.stringify(S.snapshot(state))));
-  assert.equal(restored.replacementChoices[group.id],'655-007');assert.equal(restored.decisions['655-001'].quantity,0);assert.equal(restored.decisions['655-007'].quantity,2);
+test('auto computes its own need even when Web is sufficient or excessive',()=>{
+  const p=product({stock:20,sales:[1,2,2,2],batch:20,webRecommendation:20});
+  const {r}=calculate(p,{}, {orderDate:'2026-11-02'});assert.equal(r.quantity,0);assert.equal(r.source,20);assert.equal(r.demand,1.9);
+  const mop=calculate(product({stock:15,sales:[9,17,17,21],batch:2,webRecommendation:40,promo:'А 23.10 - 30.10',commercialA:'И-индикатор'}),{}, {orderDate:'2026-11-02'}).r;
+  assert.equal(mop.quantity,16);assert.equal(mop.projection.secondBefore,5.571429);assert.equal(mop.review,false);
 });
-test('legacy sessions keep settings but never reuse approvals, even with a matching forged signature',{skip:!hasFiles},()=>{
-  const state=S.newSession(realOrder(),{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1}),c=S.calculate(state);
-  state.overrides['444-268']={mode:'hold',percent:0};S.decide(state,c,'914-005','apply',56);
-  const payload=JSON.parse(JSON.stringify(S.localPayload(state)));payload.rulesVersion='sgate-1.0';
-  const restored=S.restorePayload(state.order,payload);
-  assert.equal(Object.keys(restored.decisions).length,0);assert.equal(restored.overrides['444-268'].mode,'hold');
+test('manual values change order, metrics and export immediately; reset restores auto',()=>{
+  const p=product({stock:20,sales:[1,2,2,2],batch:20,webRecommendation:20}),s=S.newSession({products:[p],metadata:{fingerprint:'test'}});let c=S.calculate(s);
+  assert.equal(c.results.get(p.sku).quantity,0);assert.equal(S.changeRows(s,c)[0].quantity,0);assert.equal(c.metrics.orderValue,0);
+  S.setQuantity(s,c,p.sku,40);c=S.calculate(s);assert.equal(c.results.get(p.sku).quantity,40);assert.equal(c.metrics.orderValue,4000);assert.equal(S.changeRows(s,c)[0].quantity,40);
+  assert.throws(()=>S.setQuantity(s,c,p.sku,1),/кратно/);assert.equal(s.manualQuantities[p.sku],40);
+  S.resetQuantity(s,p.sku);assert.equal(S.calculate(s).results.get(p.sku).quantity,0);
+});
+test('global strategy recomputes all products and resets manual quantities without compounding',()=>{
+  const p=product({stock:100,sales:[0,0,0,0],batch:24}),b=product({sku:'SECOND',stock:50,sales:[0,0,0,0],batch:1,productCube:'ЗО'});
+  const s=S.newSession({products:[p,b],metadata:{fingerprint:'test'}});S.setQuantity(s,S.calculate(s),p.sku,48);
+  S.updateSettings(s,{...s.settings,strategy:'increase',percent:10});let c=S.calculate(s);
+  assert.deepEqual(Object.keys(s.manualQuantities),[]);assert.equal(c.results.get(p.sku).target,110);assert.equal(c.results.get(p.sku).quantity,24);assert.equal(c.results.get(b.sku).quantity,0);
+  assert.equal(S.calculate(s).results.get(p.sku).target,110);
+  const before=s.settings;assert.throws(()=>S.updateSettings(s,{...s.settings,strategy:'decrease',percent:101}),/стратегия/);assert.equal(s.settings,before);
+});
+test('manual and automatic positive orders obey bans, batch and warehouse',()=>{
+  for(const patch of [{productCube:'ЗО'},{storeCube:''},{productCube:'Группа-0.8'},{centralStock:0}]){
+    const p=product(patch),s=S.newSession({products:[p],metadata:{fingerprint:'t'}}),c=S.calculate(s);
+    assert.equal(c.results.get(p.sku).quantity,0);assert.throws(()=>S.setQuantity(s,c,p.sku,28));
+  }
+});
+test('unresolved values are null, not zero or fallback Web, and are excluded from commands',()=>{
+  const p=product({sales:[2,-1,2,2],webRecommendation:56}),s=S.newSession({products:[p],metadata:{fingerprint:'t'}}),c=S.calculate(s);
+  assert.equal(c.results.get(p.sku).quantity,null);assert.equal(c.metrics.unresolved,1);assert.equal(S.changeRows(s,c).length,0);assert.equal(S.problemItems(s,c).length,1);
+  S.setQuantity(s,c,p.sku,28);const manual=S.calculate(s);assert.equal(S.changeRows(s,manual)[0].quantity,28);assert.equal(manual.metrics.unresolved,0);assert.equal(manual.metrics.unprojected,1);assert.equal(manual.metrics.orderValue,2800);
+});
+test('full report automatically produces changes and all quantities satisfy invariants',{skip:!hasFiles},()=>{
+  const s=localState(),c=S.calculate(s);assert.equal(s.order.products.length,10626);assert.equal(c.metrics.active,7665);assert.equal(c.metrics.value,18156991.3);
+  assert.equal(c.results.get('967-001').quantity,0);assert.equal(c.results.get('444-268').quantity,16);
+  const counts={down:0,up:0,zero:0,same:0,unknown:0};for(const p of s.order.products){const r=c.results.get(p.sku);counts[r.quantity===null?'unknown':r.quantity===r.source?'same':r.quantity===0?'zero':r.quantity<r.source?'down':'up']++;if(r.quantity!==null)assert.equal(E.validateQuantity(p,r,r.quantity),null,p.sku);}
+  assert.deepEqual(counts,{down:148,up:3,zero:1264,same:8857,unknown:354});assert.equal(S.changeRows(s,c).length,1415);assert.equal(c.metrics.changes,1415);
+  assert.equal(Object.hasOwn(s,'decisions'),false);
+});
+test('cycle is one problem; selecting or entering a quantity recomputes the entire group',{skip:!hasFiles},()=>{
+  const s=localState();let c=S.calculate(s);const group=c.ctx.groupBySku.get('655-001');assert.equal(group.cyclic,true);assert.equal(group.links.length,2);
+  assert.equal(c.results.get('655-001').quantity,null);assert.equal(S.problemItems(s,c).filter(p=>group.members.includes(p.sku)).length,1);
+  S.chooseReplacement(s,c,group.id,'655-001');c=S.calculate(s);assert.equal(c.results.get('655-001').quantity,2);assert.equal(c.results.get('655-007').quantity,0);
+  S.setQuantity(s,c,'655-007',2);c=S.calculate(s);assert.equal(c.results.get('655-001').quantity,0);assert.equal(c.results.get('655-007').quantity,2);
+  const restored=S.restoreSnapshot(S.snapshot(s));assert.equal(restored.replacementChoices[group.id],'655-007');assert.equal(S.calculate(restored).results.get('655-007').quantity,2);
+});
+test('session backup is detached, validates atomic restore, and contains no approvals',{skip:!hasFiles},()=>{
+  const s=localState();S.setQuantity(s,S.calculate(s),'967-001',40);const snap=S.snapshot(s);snap.manualQuantities['967-001']=1;
+  assert.equal(s.manualQuantities['967-001'],40);assert.throws(()=>S.restoreSnapshot(snap),/кратно/);
+  const valid=S.snapshot(s),restored=S.restoreSnapshot(valid);assert.equal(restored.manualQuantities['967-001'],40);assert.equal(Object.hasOwn(valid,'decisions'),false);
+  valid.rows[0].cells.A={bad:true};assert.throws(()=>S.restoreSnapshot(valid),/ячейки/);
+});
+test('legacy approval sessions migrate to fresh automatic results, preserving forecast inputs',{skip:!hasFiles},()=>{
+  const s=localState(),payload=S.snapshot(s);payload.version=1;payload.rulesVersion='sgate-1.1';delete payload.manualQuantities;
+  payload.decisions={'967-001':{kind:'keep',quantity:20}};payload.overrides={'967-001':{mode:'hold',percent:0,forecast:2}};
+  const restored=S.restoreSnapshot(payload),r=S.calculate(restored).results.get('967-001');assert.equal(r.quantity,0);assert.equal(r.demand,2);assert.equal(Object.hasOwn(restored,'decisions'),false);assert.equal(restored.settings.strategy,'auto');
+});
+test('old cut without store cube stays unresolved, never silently zeroed',{skip:!fs.existsSync('example-files/order-cut.xlsx')},()=>{
+  const o=I.parseWorkbook(XLSX.read(fs.readFileSync('example-files/order-cut.xlsx'),{type:'buffer',nodim:true})),s=S.newSession(o),c=S.calculate(s);
+  assert.equal(o.products.length,9);for(const p of o.products){const r=c.results.get(p.sku);assert.equal(r.quantity,r.blocked?0:null);assert.ok(E.validateQuantity(p,r,p.batch));}
 });
