@@ -50,8 +50,8 @@ test('real report: automatic lower/raise/zero lists, example SKU, cycle and no d
  test.skip(!fs.existsSync(path.join(root,'example-files/order-full.xlsx')),'Local Excel is not published');
  const {errors,network}=await open(page);await loadFull(page);
  const facts=await page.evaluate(()=>{const c=SGateApp.getCalculation();return{total:c.metrics.total,changes:c.metrics.changes,unresolved:c.metrics.unresolved,value:c.metrics.value,q: c.results.get('967-001').quantity,mop:c.results.get('444-268').quantity};});
- expect(facts).toEqual({total:10626,changes:1415,unresolved:354,value:18156991.3,q:0,mop:16});
- for(const [key,count]of [['down',148],['up',3],['zero',1264]]){expect(Number((await page.locator(`#filters [data-filter=${key}] span`).textContent()).replace(/\s/g,''))).toBe(count);}
+ expect(facts).toEqual({total:10626,changes:1290,unresolved:354,value:18156991.3,q:0,mop:16});
+ for(const [key,count]of [['down',167],['up',42],['zero',1081]]){expect(Number((await page.locator(`#filters [data-filter=${key}] span`).textContent()).replace(/\s/g,''))).toBe(count);}
  await page.locator('#filters [data-filter=zero]').click();await select(page,'967-001');await expect(page.locator('#current-quantity')).toHaveText('0');await close(page);
  await select(page,'655-001');await expect(page.locator('.replacement-panel')).toContainText('Взаимная замена');await expect(page.locator('#current-quantity')).toHaveText('Не рассчитан');
  await page.locator('#replacement-form select').selectOption('655-001');await page.locator('#replacement-form button').click();await expect(page.locator('#current-quantity')).toHaveText('2');
@@ -67,4 +67,25 @@ test('old cut never converts unknown eligibility into a silent zero',async({page
 
 test('mobile layout contains global controls and searchable quantity editor',async({page})=>{
  await page.setViewportSize({width:390,height:844});const{errors}=await open(page);await demo(page);expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await expect(page.locator('#global-strategy')).toBeVisible();await select(page,'D-003');await qty(page,16);await expect(page.locator('#current-quantity')).toHaveText('16');expect(errors).toEqual([]);
+});
+
+
+test('safety stock is visible, configurable, persisted and exported for ordinary goods',async({page})=>{
+ test.skip(!fs.existsSync(path.join(root,'example-files/order-full.xlsx')),'Local Excel is not published');
+ const {errors,network}=await open(page);await loadFull(page);await select(page,'022-344');
+ await expect(page.locator('#current-quantity')).toHaveText('10');await expect(page.locator('#safety-stock-summary')).toContainText('1,1 шт.');
+ await qty(page,5);await close(page);await page.locator('#settings-button').click();
+ await expect(page.locator('[name=safetyStockPercent]')).toHaveValue('25');
+ await page.locator('[name=safetyStockPercent]').fill('200');await page.locator('#settings-form button[type=submit]').click();
+ const facts=await page.evaluate(()=>{const r=SGateApp.getCalculation().results.get('022-344');return{reserve:r.reserve,quantity:r.quantity,auto:r.autoQuantity,problem:r.problem.kind};});
+ expect(facts).toEqual({reserve:9,quantity:5,auto:15,problem:'supply'});
+ await select(page,'022-344');await page.locator('#reset-quantity').click();await expect(page.locator('#current-quantity')).toHaveText('15');await close(page);
+ const sessionDL=page.waitForEvent('download');await page.locator('#save-button').click();const backup=fs.readFileSync(await(await sessionDL).path());await page.reload();
+ await page.locator('#session-input').setInputFiles({name:'session.json',mimeType:'application/json',buffer:backup});await expect(page.locator('#workspace')).toBeVisible();
+ expect(await page.evaluate(()=>SGateApp.getState().settings.safetyStockPercent)).toBe(200);
+ await page.locator('#export-button').click();const excelDL=page.waitForEvent('download');await page.locator('#export-xlsx').click();
+ const wb=XLSX.read(fs.readFileSync(await(await excelDL).path()),{type:'buffer'}),rows=XLSX.utils.sheet_to_json(wb.Sheets['Наш заказ']);
+ expect(rows.find(r=>r['Артикул']==='022-344')['Страховой запас']).toBe(9);
+ expect(XLSX.utils.sheet_to_json(wb.Sheets['Параметры'],{header:1})).toContainEqual(['Страховой запас, % недели',200]);
+ expect(errors).toEqual([]);expect(network).toEqual([]);
 });

@@ -5,7 +5,7 @@
   'use strict';
   const empty = () => Object.create(null);
   function settings(date = E.today()) {
-    return { orderDate:date, incomingDate:E.calendar(date).first, coverageWeeks:1, strategy:'auto', percent:0 };
+    return { orderDate:date, incomingDate:E.calendar(date).first, coverageWeeks:1, strategy:'auto', percent:0, safetyStockPercent:25 };
   }
   function normalizeSettings(raw) {
     const value = { ...settings(raw.orderDate), ...raw };
@@ -106,7 +106,7 @@
   }
   function restorePayload(order,payload,allowDate=true) {
     const legacy=payload?.version === 1 && ['sgate-1.0','sgate-1.1'].includes(payload.rulesVersion);
-    if (!payload || !(payload.version === 2 && payload.rulesVersion === E.VERSION || legacy)) throw new Error('Неподдерживаемая версия сессии');
+    if (!payload || !(payload.version === 2 && [E.VERSION,'sgate-2.0'].includes(payload.rulesVersion) || legacy)) throw new Error('Неподдерживаемая версия сессии');
     if (payload.fingerprint !== order.metadata.fingerprint) throw new Error('Сессия относится к другому исходному файлу');
     const cfg=record(payload.settings,'настройки'),config={...cfg};
     if (!allowDate) {config.orderDate=E.today();config.incomingDate=E.calendar(config.orderDate).first;}
@@ -123,7 +123,7 @@
       if (!skus.has(sku) || !E.finite(q) || !Number.isInteger(q) || q < 0) throw new Error('Повреждённое ручное количество: '+sku);
       state.manualQuantities[sku]=q;
     }
-    if (legacy) state.migratedFrom=payload.rulesVersion; // Approval records are deliberately not migrated.
+    if (payload.rulesVersion !== E.VERSION) state.migratedFrom=payload.rulesVersion; // Approval records are deliberately not migrated.
     calculate(state);return state;
   }
   function restoreSnapshot(payload) {

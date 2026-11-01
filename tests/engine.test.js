@@ -65,14 +65,14 @@ test('C: percent changes target, not Web recommendation; repeated compute does n
 });
 test('incoming once reduces need; later shipment does not erase earlier stockout',()=>{
   const p=product({stock:0,incoming:10,sales:[100,100,100,100],batch:1});
-  const {r}=calculate(p,{baseTarget:100});assert.equal(r.quantity,90);
+  const {r}=calculate(p,{baseTarget:100});assert.equal(r.quantity,115);
   const {ctx}=calculate(p,{}, {incomingDate:'2026-11-12'});
   const result=E.project(p,100,100,ctx,'2026-11-12');
   assert.equal(result.lostBefore,100);assert.equal(result.firstAfter,100);assert.equal(result.secondBefore,0);
 });
 test('lost sales are not treated as backlog to refill twice',()=>{
   const p=product({stock:0,sales:[10,10,10,10],batch:1});const {r}=calculate(p);
-  assert.equal(r.zero.lostBefore,10);assert.equal(r.quantity,10);assert.equal(r.projection.firstAfter,10);
+  assert.equal(r.zero.lostBefore,10);assert.equal(r.quantity,13);assert.equal(r.projection.firstAfter,13);
 });
 test('not-for-sale flag is ignored; MTZ does not inflate demand',()=>{
   const p=product({tradeCategory:'не для продажи',mtz:100000});
@@ -157,7 +157,7 @@ test('full report automatically produces changes and all quantities satisfy inva
   const s=localState(),c=S.calculate(s);assert.equal(s.order.products.length,10626);assert.equal(c.metrics.active,7665);assert.equal(c.metrics.value,18156991.3);
   assert.equal(c.results.get('967-001').quantity,0);assert.equal(c.results.get('444-268').quantity,16);
   const counts={down:0,up:0,zero:0,same:0,unknown:0};for(const p of s.order.products){const r=c.results.get(p.sku);counts[r.quantity===null?'unknown':r.quantity===r.source?'same':r.quantity===0?'zero':r.quantity<r.source?'down':'up']++;if(r.quantity!==null)assert.equal(E.validateQuantity(p,r,r.quantity),null,p.sku);}
-  assert.deepEqual(counts,{down:148,up:3,zero:1264,same:8857,unknown:354});assert.equal(S.changeRows(s,c).length,1415);assert.equal(c.metrics.changes,1415);
+  assert.deepEqual(counts,{down:167,up:42,zero:1081,same:8982,unknown:354});assert.equal(S.changeRows(s,c).length,1290);assert.equal(c.metrics.changes,1290);
   assert.equal(Object.hasOwn(s,'decisions'),false);
 });
 test('cycle is one problem; selecting or entering a quantity recomputes the entire group',{skip:!hasFiles},()=>{
@@ -181,4 +181,56 @@ test('legacy approval sessions migrate to fresh automatic results, preserving fo
 test('old cut without store cube stays unresolved, never silently zeroed',{skip:!fs.existsSync('example-files/order-cut.xlsx')},()=>{
   const o=I.parseWorkbook(XLSX.read(fs.readFileSync('example-files/order-cut.xlsx'),{type:'buffer',nodim:true})),s=S.newSession(o),c=S.calculate(s);
   assert.equal(o.products.length,9);for(const p of o.products){const r=c.results.get(p.sku);assert.equal(r.quantity,r.blocked?0:null);assert.ok(E.validateQuantity(p,r,p.batch));}
+});
+
+
+test('safety stock applies to ordinary goods, has a one-unit floor and no reserve for zero demand',()=>{
+  for(const protectedTag of ['', 'И-индикатор']){
+    const p=product({stock:0,sales:[0.1,0.1,0.1,0.1],batch:1,commercialA:protectedTag});
+    const r=calculate(p).r;assert.equal(r.reserve,1);assert.equal(r.quantity,2);
+    const zero=calculate({...p,sales:[0,0,0,0]}).r;assert.equal(zero.reserve,0);assert.equal(zero.quantity,0);
+  }
+  const r=calculate(product({stock:0,sales:[100,100,100,100],batch:1})).r;
+  assert.equal(r.reserve,25);assert.equal(r.quantity,125);assert.equal(r.projection.secondBefore,25);
+});
+test('global safety percentage changes ordinary goods but never lowers protected goods below 25 percent',()=>{
+  const p=product({stock:0,sales:[100,100,100,100],batch:1});
+  assert.equal(calculate(p,{}, {safetyStockPercent:10}).r.reserve,10);
+  assert.equal(calculate({...p,priceCategory:'ПЦ'}, {},{safetyStockPercent:10}).r.reserve,25);
+  assert.equal(calculate({...p,priceCategory:'ПЦ'}, {},{safetyStockPercent:50}).r.reserve,50);
+  assert.equal(calculate(p,{}, {safetyStockPercent:0}).r.reserve,1);
+  for(const safetyStockPercent of [-1,501,null,'25',NaN]){
+    if(safetyStockPercent === null)continue; // null is treated as the default by the pure engine.
+    assert.throws(()=>calculate(p,{}, {safetyStockPercent}),/Страховой запас/);
+  }
+});
+test('safety floor remains in every strategy, including an aggressive decrease and low explicit target',()=>{
+  const p=product({stock:0,sales:[100,100,100,100],batch:1});
+  for(const mode of ['auto','hold','increase','decrease']){
+    const r=calculate(p,{mode,percent:mode === 'decrease'?99:0,baseTarget:1}).r;
+    assert.equal(r.reserve,25);assert.equal(r.quantity,125);
+  }
+  for(const patch of [{productCube:'ЗО'},{storeCube:''},{productCube:'Группа-0.8'}])assert.equal(calculate({...p,...patch}).r.quantity,0);
+  const capped=calculate({...p,centralStock:100}).r;assert.equal(capped.quantity,100);assert.equal(capped.problem.kind,'supply');
+});
+test('safety setting is validated atomically and preserves explicit manual quantities',()=>{
+  const p=product({stock:1,sales:[2,5,3,6],batch:5}),s=S.newSession({products:[p],metadata:{fingerprint:'t'}},{orderDate:'2026-11-02',incomingDate:'2026-11-05',coverageWeeks:1});
+  S.setQuantity(s,S.calculate(s),p.sku,5);
+  S.updateSettings(s,{...s.settings,safetyStockPercent:200});const r=S.calculate(s).results.get(p.sku);
+  assert.equal(r.autoQuantity,15);assert.equal(r.quantity,5);assert.equal(r.problem.kind,'supply');
+  const old=s.settings;assert.throws(()=>S.updateSettings(s,{...old,safetyStockPercent:501}),/Страховой запас/);assert.equal(s.settings,old);
+  S.resetQuantity(s,p.sku);assert.equal(S.calculate(s).results.get(p.sku).quantity,15);
+});
+test('022-344 includes reserve before batch rounding and still identifies shortage before arrival',{skip:!hasFiles},()=>{
+  const s=localState(),c=S.calculate(s),r=c.results.get('022-344');
+  assert.equal(r.demand,4.5);assert.equal(r.reserve,1.125);assert.equal(r.quantity,10);assert.equal(r.projection.secondBefore,5.5);
+  assert.ok(r.projection.lostBefore>0);assert.equal(r.problem.kind,'arrival');
+  assert.equal(S.changeRows(s,c).find(row=>row.sku==='022-344').quantity,10);
+});
+test('2.0 sessions gain the default safety setting, retain manual quantities and recalculate',{skip:!hasFiles},()=>{
+  const s=localState();S.setQuantity(s,S.calculate(s),'022-344',5);const payload=S.snapshot(s);
+  payload.rulesVersion='sgate-2.0';delete payload.settings.safetyStockPercent;
+  const restored=S.restoreSnapshot(payload),r=S.calculate(restored).results.get('022-344');
+  assert.equal(restored.settings.safetyStockPercent,25);assert.equal(r.autoQuantity,10);assert.equal(r.quantity,5);assert.equal(r.problem.kind,'supply');
+  assert.equal(S.restoreSnapshot(S.snapshot(restored)).settings.safetyStockPercent,25);
 });

@@ -5,7 +5,7 @@
   else root.SGate = Object.assign(root.SGate || {}, api);
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
-  const VERSION = 'sgate-2.0';
+  const VERSION = 'sgate-2.1';
   const DAY = 86400000;
   const BLOCKS = new Set(['ЗО', 'ЗО вр', 'ЗО сеть', '!ВНЕ_АМ-1']);
   const WEIGHTS = [0.1, 0.2, 0.3, 0.4];
@@ -112,6 +112,8 @@
   function createContext(order, settings, replacementChoices = {}) {
     const strategy = settings.strategy || 'auto', percent = Number(settings.percent || 0);
     if (!['auto','hold','increase','decrease'].includes(strategy) || !finite(percent) || percent < 0 || percent > 500 || strategy === 'decrease' && percent > 100) throw new Error('Неверная глобальная стратегия/процент');
+    const safetyStockPercent = settings.safetyStockPercent ?? 25;
+    if (!finite(safetyStockPercent) || safetyStockPercent < 0 || safetyStockPercent > 500) throw new Error('Страховой запас: процент от 0 до 500');
     const cal = calendar(settings.orderDate);
     const incomingDate = settings.incomingDate || cal.first;
     if (dayValue(incomingDate) < dayValue(settings.orderDate) || new Date(dayValue(incomingDate)).getUTCDay() !== 4) throw new Error('Едущая партия должна приходить в четверг не раньше дня расчёта');
@@ -218,7 +220,8 @@
   function compute(p, ctx, override = {}) {
     const cube = cubeEligibility(p), replacement = replacementGate(p, ctx);
     const fc = forecast(p, override), D = fc.value || 0, protectedStock = protectedItem(p);
-    const reserve = protectedStock ? D * 0.25 : 0;
+    const reservePercent = Math.max(ctx.settings.safetyStockPercent ?? 25, protectedStock ? 25 : 0);
+    const reserve = D > 0 ? Math.max(1, D * reservePercent / 100) : 0;
     const promo = promoInterval(p.promo, ctx.settings.orderDate);
     const older = (p.sales[0] + p.sales[1]) / 2, recent = (p.sales[2] + p.sales[3]) / 2;
     // Diagnostic only: preserve every sale; a two-week promotion can evade a single-peak check.
@@ -254,7 +257,8 @@
     const warnings = [], reasons = [cube.reason];
     if (replacement.reason) reasons.push(replacement.reason);
     reasons.push(fc.manual ? `Недельный прогноз задан вручную: ${round(D)}` : `Продажи ${p.sales.join(' / ')}; веса 10/20/30/40${fc.excluded ? ', промонедели исключены вручную' : ''}; прогноз ${fc.value === null ? 'не определён' : round(D)}`);
-    if (protectedStock) reasons.push(`Защищённое наличие: резерв ${round(reserve)} шт. (25% недели)`);
+    if (D > 0) reasons.push(`Страховой запас ${round(reserve)} шт.: максимум из 1 шт. и ${reservePercent}% недельного спроса${protectedStock ? '; защищённый товар — минимум 25%' : ''}`);
+    else if (fc.value === 0) reasons.push('Спрос 0: страховой запас не создаётся');
     if (fc.value !== null) reasons.push(`Без заказа к ${ctx.cal.first}: ${zero.firstSigned}, к ${ctx.cal.second}: ${zero.secondSigned} шт.`);
     reasons.push(`Целевой запас после поступления: база ${round(baseTarget)} → цель ${round(target)}; недостача ${round(needed)}; партия ${p.batch}`);
     reasons.push(`Исходный Web ${source} используется для сравнения, а не как норма заказа`);
@@ -285,7 +289,7 @@
       else if (projection && projection.lostBefore > 0) problem = {required:true,kind:'arrival',severity:70,text:'Дефицит до ближайшей поставки: текущий заказ не успеет'};
     }
     const control = cube.allowed && (merch.length > 0 || p.priceCategory === 'У' || fc.spike || p.allocations > 0 || Boolean(p.warnings));
-    return { sku:p.sku,cube,replacement,forecast:fc,demand:fc.value,protected:protectedStock,reserve:round(reserve),baseTarget:round(baseTarget),target:round(target),needed:round(needed),quantity,autoQuantity:quantity,source,sourceProjection,sourceRisk,webConflict,limited,warnings,reasons,merch,zero,projection,mode,percent,review,blocked,problem,control,group:replacement.group,manual:false };
+    return { sku:p.sku,cube,replacement,forecast:fc,demand:fc.value,protected:protectedStock,reserve:round(reserve),reservePercent,baseTarget:round(baseTarget),target:round(target),needed:round(needed),quantity,autoQuantity:quantity,source,sourceProjection,sourceRisk,webConflict,limited,warnings,reasons,merch,zero,projection,mode,percent,review,blocked,problem,control,group:replacement.group,manual:false };
   }
   function validateQuantity(p, result, quantity) {
     const error = validCorrection(p,quantity);
