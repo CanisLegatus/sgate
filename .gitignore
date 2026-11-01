@@ -23,3 +23,13 @@ venv/
 .DS_Store
 .idea/
 .vscode/
+
+# Development dependencies and browser artifacts
+node_modules/
+test-results/
+playwright-report/
+/analysis/browser/
+
+# User session backups and manual-import exports
+sgate-session-*.json
+sgate-changes-*.csv

@@ -1,0 +1,14 @@
+{
+  "name": "sgate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline order review assistant",
+  "scripts": {
+    "test": "node --test tests/engine.test.js",
+    "test:browser": "playwright test",
+    "build": "node scripts/build.js"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.64.1"
+  }
+}

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'">
+<title>sgate — помощник заказа</title>
+<link rel="stylesheet" href="app/styles.css">
+</head>
+<body>
+<header class="topbar"><a class="brand" href="#" aria-label="sgate, главная"><span class="brand-icon">s<span>g</span></span><span>sgate<small>ПОМОЩНИК ЗАКАЗА</small></span></a><div class="top-actions"><span class="local-indicator"><i></i> Работает на вашем компьютере</span><button class="button quiet" id="settings-button">Настройки расчёта</button><button class="button quiet" id="restore-button">Открыть сессию</button></div></header>
+<main>
+<section id="welcome" class="welcome">
+ <div class="eyebrow">ЕЖЕНЕДЕЛЬНЫЙ ЗАКАЗ · ГАЛАМАРТ</div>
+ <h1>Заказ под<br><em>контролем.</em></h1>
+ <p class="intro">Проверьте рекомендации, выберите стратегию для каждого товара и соберите согласованные изменения.</p>
+ <div class="welcome-layout"><div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Загрузить Excel заказа"><div class="file-icon">↥</div><h2>Откройте выгрузку заказа</h2><p>Перетащите сюда Excel или выберите файл.<br>Исходный файл останется без изменений.</p><span class="button primary">Выбрать Excel</span><small>.xlsx · обработка в браузере · интернет не нужен</small></div><div class="welcome-aside"><span class="step-number">01—03</span><h2>От цифр<br>к решению.</h2><ol><li><strong>Проверяем допуск</strong><span>Кубы, запреты и доступность</span></li><li><strong>Считаем вперёд</strong><span>Продажи и остаток до второго четверга</span></li><li><strong>Вы решаете</strong><span>Стратегия, количество и подтверждение</span></li></ol><button id="demo-button" class="text-button">Посмотреть на демо-данных →</button></div></div>
+ <div class="welcome-bottom"><span>352 м² торговой площади</span><span>Поставки по четвергам</span><span>Все решения остаются у вас</span></div>
+</section>
+<section id="workspace" hidden>
+ <div class="page-heading"><div><div class="eyebrow">РАБОЧИЙ СТОЛ</div><h1>Проверка заказа<span class="heading-dot">.</span></h1><p id="source-label" class="muted"></p></div><div class="heading-actions"><button id="new-file-button" class="button quiet">Другой Excel</button><button id="save-button" class="button">Сохранить сессию</button><button id="export-button" class="button primary">Выгрузить решения ↗</button></div></div>
+ <div id="notice" class="notice" hidden></div>
+ <div class="schedule" id="schedule"></div>
+ <div class="metrics" id="metrics"></div>
+ <div class="work-panel"><div class="panel-top"><div><h2>Товары <span id="table-count"></span></h2><p class="muted">Предложения требуют подтверждения. Пики продаж не срезаются.</p></div><label class="search"><span>⌕</span><input id="search" type="search" placeholder="Артикул, товар или категория" aria-label="Поиск товаров"></label></div>
+ <div class="filter-row" id="filters"></div>
+ <div class="table-tools"><span id="list-summary"></span><div><label class="sort-label">Порядок <select id="sort"><option value="priority">По важности</option><option value="sku">По артикулу</option><option value="delta">По изменению заказа</option></select></label><button class="button small" id="approve-zeros">Согласовать запреты (0)</button></div></div>
+ <div class="table-scroll"><table class="products"><thead><tr><th>Товар</th><th>Продажи −4 → −1</th><th>Прогноз<br><small>шт./нед.</small></th><th>Остаток / едет</th><th>Исходный<br><small>Web / УМ</small></th><th>Предложение</th><th>Решение</th></tr></thead><tbody id="product-rows"></tbody></table></div>
+ <div class="pagination"><span id="page-label"></span><div><button id="prev-page" class="button small">← Назад</button><button id="next-page" class="button small">Далее →</button></div></div></div>
+ <div class="workspace-footnote">Прогноз — оценка, не гарантия продаж. Сумма заказа на экране включает ещё не просмотренные исходные количества. Перед отправкой проверьте заказ в Web-заказе.</div>
+</section>
+</main>
+<aside id="drawer" class="drawer" hidden aria-label="Карточка товара"></aside><div id="drawer-shade" class="drawer-shade" hidden></div>
+<dialog id="settings-dialog"><form id="settings-form"><div class="dialog-heading"><div><div class="eyebrow">ПАРАМЕТРЫ</div><h2>Календарь и расчёт</h2></div><button type="button" class="icon-button" data-close="settings-dialog" aria-label="Закрыть">×</button></div><label>Дата формирования заказа<input type="date" name="orderDate" required></label><label>Уже едущие партии приходят<input type="date" name="incomingDate" required><small>По умолчанию ближайший четверг. Это допущение: измените, если партия придёт позднее. Отдельную дату можно задать в карточке.</small></label><label>Минимальное покрытие после поставки, недель<input type="number" name="coverageWeeks" min="1" max="12" step="0.5" value="1" required><small>Стартовая настройка — 1 неделя. Защищённым товарам добавляется резерв 25% недельного прогноза.</small></label><p class="info-note">Дата меняет горизонт и отменяет подтверждения с прежним расчётом. Проверка идёт до второго четверга. Веса продаж: 10 / 20 / 30 / 40%. МТЗ — справочно. Сезонный контроль выключен.</p><button class="button primary" type="submit">Применить и пересчитать</button></form></dialog>
+<dialog id="export-dialog"><div class="dialog-heading"><div><div class="eyebrow">СОГЛАСОВАННЫЕ РЕШЕНИЯ</div><h2>Перенос в Web-заказ</h2></div><button class="icon-button" data-close="export-dialog" aria-label="Закрыть">×</button></div><div id="export-summary"></div><div class="export-options"><button id="export-csv" class="button primary">Изменения CSV</button><button id="export-xlsx" class="button">Отчёт Excel</button></div><p class="info-note">В список изменений входят только подтверждённые корректировки. «Оставить исходный» не создаёт команду ввода. Ноль — явное обнуление. Отчёт предназначен для ручного переноса; совместимость с импортом Web-заказа не заявлена. Финальная проверка и отправка остаются за вами.</p></dialog>
+<input type="file" id="file-input" accept=".xlsx,.xlsm,.xls" hidden><input type="file" id="session-input" accept=".json" hidden>
+<div id="toast" class="toast" role="status" hidden></div><div id="busy" class="busy" hidden><span></span><strong>Разбираем заказ…</strong><small>Все вычисления происходят в браузере</small></div>
+<script src="vendor/xlsx.full.min.js"></script><script src="app/engine.js"></script><script src="app/importer.js"></script><script src="app/session.js"></script><script src="app/main.js"></script>
+</body></html>
